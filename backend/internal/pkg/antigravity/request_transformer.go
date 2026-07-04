@@ -690,17 +690,7 @@ func hasWebSearchTool(tools []ClaudeTool) bool {
 }
 
 func isWebSearchTool(tool ClaudeTool) bool {
-	if strings.HasPrefix(tool.Type, "web_search") || tool.Type == "google_search" {
-		return true
-	}
-
-	name := strings.TrimSpace(tool.Name)
-	switch name {
-	case "web_search", "google_search", "web_search_20250305":
-		return true
-	default:
-		return false
-	}
+	return strings.HasPrefix(tool.Type, "web_search") || tool.Type == "google_search"
 }
 
 // buildTools 构建 tools

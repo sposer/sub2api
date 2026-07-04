@@ -286,6 +286,22 @@ func TestBuildTools_PreservesWebSearchAlongsideFunctions(t *testing.T) {
 	require.Equal(t, 5, result[1].GoogleSearch.EnhancedContent.ImageSearch.MaxResultCount)
 }
 
+func TestBuildTools_TreatsNamedWebSearchWithSchemaAsFunction(t *testing.T) {
+	tools := []ClaudeTool{
+		{
+			Name:        "web_search",
+			Description: "Client-side web search function",
+			InputSchema: map[string]any{"type": "object"},
+		},
+	}
+
+	result := buildTools(tools)
+	require.Len(t, result, 1)
+	require.Nil(t, result[0].GoogleSearch)
+	require.Len(t, result[0].FunctionDeclarations, 1)
+	require.Equal(t, "web_search", result[0].FunctionDeclarations[0].Name)
+}
+
 func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 	tests := []struct {
 		name        string

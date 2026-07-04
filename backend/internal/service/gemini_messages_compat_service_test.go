@@ -366,6 +366,30 @@ func TestConvertClaudeToolsToGeminiTools_PreservesWebSearchAlongsideFunctions(t 
 	require.Empty(t, googleSearch)
 }
 
+func TestConvertClaudeToolsToGeminiTools_TreatsNamedWebSearchWithSchemaAsFunction(t *testing.T) {
+	tools := []any{
+		map[string]any{
+			"name":         "web_search",
+			"description":  "Client-side web search function",
+			"input_schema": map[string]any{"type": "object"},
+		},
+	}
+
+	result := convertClaudeToolsToGeminiTools(tools)
+	require.Len(t, result, 1)
+
+	functionDecl, ok := result[0].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, functionDecl, "googleSearch")
+	funcDecls, ok := functionDecl["functionDeclarations"].([]any)
+	require.True(t, ok)
+	require.Len(t, funcDecls, 1)
+
+	webSearchDecl, ok := funcDecls[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "web_search", webSearchDecl["name"])
+}
+
 func TestGeminiHandleNativeNonStreamingResponse_DebugDisabledDoesNotEmitHeaderLogs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logSink, restore := captureStructuredLog(t)
