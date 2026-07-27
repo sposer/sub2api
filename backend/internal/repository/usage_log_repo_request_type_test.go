@@ -58,6 +58,8 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			log.CacheCreation1hTokens,
 			log.ImageOutputTokens,
 			log.ImageOutputCost,
+			log.ImageInputTokens,
+			log.ImageInputCost,
 			log.InputCost,
 			log.OutputCost,
 			log.CacheCreationCost,
@@ -80,16 +82,21 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			sqlmock.AnyArg(), // image_output_size
 			sqlmock.AnyArg(), // image_size_source
 			sqlmock.AnyArg(), // image_size_breakdown
+			sqlmock.AnyArg(), // video_count
+			sqlmock.AnyArg(), // video_resolution
+			sqlmock.AnyArg(), // video_duration_seconds
 			sqlmock.AnyArg(), // service_tier
 			sqlmock.AnyArg(), // reasoning_effort
 			sqlmock.AnyArg(), // inbound_endpoint
 			sqlmock.AnyArg(), // upstream_endpoint
 			log.CacheTTLOverridden,
+			log.LongContextBillingApplied,
 			sqlmock.AnyArg(), // channel_id
 			sqlmock.AnyArg(), // model_mapping_chain
 			sqlmock.AnyArg(), // billing_tier
 			sqlmock.AnyArg(), // billing_mode
 			sqlmock.AnyArg(), // account_stats_cost
+			sqlmock.AnyArg(), // session_id
 			createdAt,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(99), createdAt))
@@ -141,6 +148,8 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			log.CacheCreation1hTokens,
 			log.ImageOutputTokens,
 			log.ImageOutputCost,
+			log.ImageInputTokens,
+			log.ImageInputCost,
 			log.InputCost,
 			log.OutputCost,
 			log.CacheCreationCost,
@@ -163,16 +172,21 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			sqlmock.AnyArg(), // image_output_size
 			sqlmock.AnyArg(), // image_size_source
 			sqlmock.AnyArg(), // image_size_breakdown
+			sqlmock.AnyArg(), // video_count
+			sqlmock.AnyArg(), // video_resolution
+			sqlmock.AnyArg(), // video_duration_seconds
 			serviceTier,
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			sqlmock.AnyArg(),
 			log.CacheTTLOverridden,
+			log.LongContextBillingApplied,
 			sqlmock.AnyArg(), // channel_id
 			sqlmock.AnyArg(), // model_mapping_chain
 			sqlmock.AnyArg(), // billing_tier
 			sqlmock.AnyArg(), // billing_mode
 			sqlmock.AnyArg(), // account_stats_cost
+			sqlmock.AnyArg(), // session_id
 			createdAt,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).AddRow(int64(100), createdAt))
@@ -259,11 +273,11 @@ func TestPrepareUsageLogInsert_PersistsImageSizeMetadata(t *testing.T) {
 		CreatedAt:          time.Date(2025, 1, 6, 12, 0, 0, 0, time.UTC),
 	})
 
-	require.Equal(t, sql.NullString{String: imageSize, Valid: true}, prepared.args[34])
-	require.Equal(t, sql.NullString{String: inputSize, Valid: true}, prepared.args[35])
-	require.Equal(t, sql.NullString{String: outputSize, Valid: true}, prepared.args[36])
-	require.Equal(t, sql.NullString{String: source, Valid: true}, prepared.args[37])
-	breakdownJSON, ok := prepared.args[38].(string)
+	require.Equal(t, sql.NullString{String: imageSize, Valid: true}, prepared.args[36])
+	require.Equal(t, sql.NullString{String: inputSize, Valid: true}, prepared.args[37])
+	require.Equal(t, sql.NullString{String: outputSize, Valid: true}, prepared.args[38])
+	require.Equal(t, sql.NullString{String: source, Valid: true}, prepared.args[39])
+	breakdownJSON, ok := prepared.args[40].(string)
 	require.True(t, ok)
 	require.JSONEq(t, `{"1K":1,"4K":1}`, breakdownJSON)
 }
@@ -281,9 +295,14 @@ func TestAppendUsageLogBillingModeWhereCondition(t *testing.T) {
 		wantCondition string
 	}{
 		{
-			name:          "image includes legacy image rows",
+			name:          "image includes explicit image and legacy image rows",
 			billingMode:   string(service.BillingModeImage),
-			wantCondition: "(billing_mode = $1 OR COALESCE(image_count, 0) > 0)",
+			wantCondition: "(billing_mode = $1 OR ((billing_mode IS NULL OR billing_mode = '') AND COALESCE(image_count, 0) > 0))",
+		},
+		{
+			name:          "video remains exact",
+			billingMode:   string(service.BillingModeVideo),
+			wantCondition: "billing_mode = $1",
 		},
 		{
 			name:          "token includes legacy non-image rows",
@@ -309,7 +328,7 @@ func TestAppendUsageLogBillingModeWhereCondition(t *testing.T) {
 func TestAppendUsageLogBillingModeWhereConditionWithAlias(t *testing.T) {
 	conditions, args := appendUsageLogBillingModeWhereConditionWithAlias(nil, nil, string(service.BillingModeImage), "ul")
 
-	require.Equal(t, []string{"(ul.billing_mode = $1 OR COALESCE(ul.image_count, 0) > 0)"}, conditions)
+	require.Equal(t, []string{"(ul.billing_mode = $1 OR ((ul.billing_mode IS NULL OR ul.billing_mode = '') AND COALESCE(ul.image_count, 0) > 0))"}, conditions)
 	require.Equal(t, []any{string(service.BillingModeImage)}, args)
 }
 
@@ -777,6 +796,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullInt64{},
 			0, 0, 0, 0, 0, 0,
 			0, 0.0, // image_output_tokens, image_output_cost
+			0, 0.0, // image_input_tokens, image_input_cost
 			0.0, 0.0, 0.0, 0.0, 0.8, 0.8,
 			1.0,
 			sql.NullFloat64{},
@@ -794,16 +814,21 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{Valid: true, String: "3840x2160"},
 			sql.NullString{Valid: true, String: "output"},
 			sql.NullString{Valid: true, String: `{"4K":2}`},
+			0,                // video_count
+			sql.NullString{}, // video_resolution
+			sql.NullInt64{},  // video_duration_seconds
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
+			false,
 			false,
 			sql.NullInt64{},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullFloat64{},
+			sql.NullString{},
 			now,
 		}})
 		require.NoError(t, err)
@@ -840,6 +865,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			6,                 // cache_creation_1h_tokens
 			0,                 // image_output_tokens
 			0.0,               // image_output_cost
+			0,                 // image_input_tokens
+			0.0,               // image_input_cost
 			0.1,               // input_cost
 			0.2,               // output_cost
 			0.3,               // cache_creation_cost
@@ -862,16 +889,21 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{}, // image_output_size
 			sql.NullString{}, // image_size_source
 			sql.NullString{}, // image_size_breakdown
+			0,                // video_count
+			sql.NullString{}, // video_resolution
+			sql.NullInt64{},  // video_duration_seconds
 			sql.NullString{Valid: true, String: "priority"},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
+			false,
 			false,
 			sql.NullInt64{},   // channel_id
 			sql.NullString{},  // model_mapping_chain
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // session_id
 			now,
 		}})
 		require.NoError(t, err)
@@ -897,6 +929,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullInt64{},
 			1, 2, 3, 4, 5, 6,
 			0, 0.0, // image_output_tokens, image_output_cost
+			0, 0.0, // image_input_tokens, image_input_cost
 			0.1, 0.2, 0.3, 0.4, 1.0, 0.9,
 			1.0,
 			sql.NullFloat64{},
@@ -914,16 +947,21 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{}, // image_output_size
 			sql.NullString{}, // image_size_source
 			sql.NullString{}, // image_size_breakdown
+			0,                // video_count
+			sql.NullString{}, // video_resolution
+			sql.NullInt64{},  // video_duration_seconds
 			sql.NullString{Valid: true, String: "flex"},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
+			false,
 			false,
 			sql.NullInt64{},   // channel_id
 			sql.NullString{},  // model_mapping_chain
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // session_id
 			now,
 		}})
 		require.NoError(t, err)
@@ -949,6 +987,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullInt64{},
 			1, 2, 3, 4, 5, 6,
 			0, 0.0, // image_output_tokens, image_output_cost
+			0, 0.0, // image_input_tokens, image_input_cost
 			0.1, 0.2, 0.3, 0.4, 1.0, 0.9,
 			1.0,
 			sql.NullFloat64{},
@@ -966,16 +1005,21 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{}, // image_output_size
 			sql.NullString{}, // image_size_source
 			sql.NullString{}, // image_size_breakdown
+			0,                // video_count
+			sql.NullString{}, // video_resolution
+			sql.NullInt64{},  // video_duration_seconds
 			sql.NullString{Valid: true, String: "priority"},
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullString{},
+			false,
 			false,
 			sql.NullInt64{},   // channel_id
 			sql.NullString{},  // model_mapping_chain
 			sql.NullString{},  // billing_tier
 			sql.NullString{},  // billing_mode
 			sql.NullFloat64{}, // account_stats_cost
+			sql.NullString{},  // session_id
 			now,
 		}})
 		require.NoError(t, err)
