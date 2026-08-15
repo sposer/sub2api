@@ -1390,6 +1390,61 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
         }
       }
     },
+    'gemini-3.7-flash': {
+      name: 'Gemini 3.7 Flash',
+      limit: {
+        context: 1048576,
+        output: 65536
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text']
+      }
+    },
+    'gemini-3.7-flash-high': {
+      name: 'Gemini 3.7 Flash High',
+      limit: {
+        context: 1048576,
+        output: 65536
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text']
+      }
+    },
+    'gemini-3.7-flash-medium': {
+      name: 'Gemini 3.7 Flash Medium',
+      limit: {
+        context: 1048576,
+        output: 65536
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text']
+      }
+    },
+    'gemini-3.7-flash-low': {
+      name: 'Gemini 3.7 Flash Low',
+      limit: {
+        context: 1048576,
+        output: 65536
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text']
+      }
+    },
+    'gemini-3.7-flash-tiered': {
+      name: 'Gemini 3.7 Flash Tiered',
+      limit: {
+        context: 1048576,
+        output: 65536
+      },
+      modalities: {
+        input: ['text', 'image', 'pdf'],
+        output: ['text']
+      }
+    },
     'gemini-2.5-flash-image': {
       name: 'Gemini 2.5 Flash Image',
       limit: {

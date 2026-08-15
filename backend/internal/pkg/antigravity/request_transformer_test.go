@@ -392,6 +392,34 @@ func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 	}
 }
 
+func TestBuildGenerationConfig_Gemini37OmitsUnsupportedSamplingParameters(t *testing.T) {
+	temperature := 0.7
+	topP := 0.9
+	topK := 40
+
+	for _, model := range []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cfg := buildGenerationConfig(&ClaudeRequest{
+				Model:       model,
+				Temperature: &temperature,
+				TopP:        &topP,
+				TopK:        &topK,
+			})
+
+			require.Nil(t, cfg.Temperature)
+			require.Nil(t, cfg.TopP)
+			require.Nil(t, cfg.TopK)
+			require.Empty(t, cfg.StopSequences)
+		})
+	}
+}
+
 func TestTransformClaudeToGeminiWithOptions_PreservesBillingHeaderSystemBlock(t *testing.T) {
 	tests := []struct {
 		name   string

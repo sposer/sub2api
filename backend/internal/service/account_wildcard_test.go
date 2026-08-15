@@ -535,6 +535,14 @@ func TestAccountGetModelMapping_AntigravityEnsuresGeminiDefaultPassthroughs(t *t
 	if mapping["gemini-3.1-pro-low"] != "gemini-3.1-pro-low" {
 		t.Fatalf("expected gemini-3.1-pro-low passthrough to be auto-filled, got: %q", mapping["gemini-3.1-pro-low"])
 	}
+	if mapping["gemini-3.7-flash"] != "gemini-3.7-flash-medium" {
+		t.Fatalf("expected gemini-3.7-flash to default to medium tier, got: %q", mapping["gemini-3.7-flash"])
+	}
+	for _, model := range []string{"gemini-3.7-flash-high", "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-tiered"} {
+		if mapping[model] != model {
+			t.Fatalf("expected %s passthrough to be auto-filled, got: %q", model, mapping[model])
+		}
+	}
 }
 
 func TestAccountGetModelMapping_AntigravityRespectsWildcardOverride(t *testing.T) {
@@ -557,8 +565,17 @@ func TestAccountGetModelMapping_AntigravityRespectsWildcardOverride(t *testing.T
 	if _, exists := mapping["gemini-3.1-pro-low"]; exists {
 		t.Fatalf("did not expect explicit gemini-3.1-pro-low passthrough when wildcard already exists")
 	}
+	if _, exists := mapping["gemini-3.7-flash"]; exists {
+		t.Fatalf("did not expect explicit gemini-3.7-flash mapping when wildcard already exists")
+	}
+	if _, exists := mapping["gemini-3.7-flash-high"]; exists {
+		t.Fatalf("did not expect explicit gemini-3.7-flash-high passthrough when wildcard already exists")
+	}
 	if mapped := account.GetMappedModel("gemini-3-flash"); mapped != "gemini-3.1-pro-high" {
 		t.Fatalf("expected wildcard mapping to stay effective, got: %q", mapped)
+	}
+	if mapped := account.GetMappedModel("gemini-3.7-flash"); mapped != "gemini-3.1-pro-high" {
+		t.Fatalf("expected Gemini 3.7 wildcard mapping to stay effective, got: %q", mapped)
 	}
 }
 

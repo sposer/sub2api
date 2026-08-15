@@ -103,6 +103,18 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gemini-3.1-pro')
   })
 
+  it('antigravity 模型列表包含 Gemini 3.7 Flash 全部等级', () => {
+    const models = getModelsByPlatform('antigravity')
+
+    expect(models).toEqual(expect.arrayContaining([
+      'gemini-3.7-flash',
+      'gemini-3.7-flash-high',
+      'gemini-3.7-flash-medium',
+      'gemini-3.7-flash-low',
+      'gemini-3.7-flash-tiered'
+    ]))
+  })
+
   it('whitelist 模式会忽略通配符条目', () => {
     const mapping = buildModelMappingObject('whitelist', ['claude-*', 'gemini-3.1-flash-image'], [])
     expect(mapping).toEqual({
