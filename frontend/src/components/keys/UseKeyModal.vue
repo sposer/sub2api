@@ -262,6 +262,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { fetchCodexModelsManifest } from '@/api/codex'
+import { fetchGatewayModelIDs } from '@/api/gatewayModels'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -312,6 +313,9 @@ const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 let codexModelManifestController: AbortController | null = null
 let codexModelManifestRequestID = 0
+const antigravityModelIDs = ref<string[]>([])
+let antigravityModelsController: AbortController | null = null
+let antigravityModelsRequestID = 0
 
 const showCodexModelCatalog = computed(() =>
   props.show &&
@@ -357,6 +361,7 @@ watch(() => props.show, (show) => {
     codexAuthMode.value = 'legacy'
   } else {
     resetCodexModelManifest()
+    resetAntigravityModels()
   }
 })
 
@@ -365,6 +370,17 @@ watch(codexManifestContext, (context, previousContext) => {
     resetCodexModelManifest()
   }
 })
+
+watch(
+  [() => props.show, () => props.platform, () => props.baseUrl, () => props.apiKey],
+  ([show, platform]) => {
+    resetAntigravityModels()
+    if (show && platform === 'antigravity' && props.apiKey) {
+      void loadAntigravityModels()
+    }
+  },
+  { immediate: true }
+)
 
 // Reset shell tab when client changes
 watch(activeClientTab, () => {
@@ -614,6 +630,38 @@ function resetCodexModelManifest() {
   codexModelManifestModelCount.value = 0
 }
 
+function resetAntigravityModels() {
+  antigravityModelsController?.abort()
+  antigravityModelsController = null
+  antigravityModelsRequestID += 1
+  antigravityModelIDs.value = []
+}
+
+async function loadAntigravityModels() {
+  antigravityModelsController?.abort()
+  const controller = new AbortController()
+  const requestID = ++antigravityModelsRequestID
+  antigravityModelsController = controller
+
+  try {
+    const modelIDs = await fetchGatewayModelIDs(props.baseUrl, props.apiKey, controller.signal)
+    if (requestID === antigravityModelsRequestID) {
+      antigravityModelIDs.value = modelIDs
+    }
+  } catch (error) {
+    const errorName = error && typeof error === 'object' && 'name' in error
+      ? String((error as { name?: unknown }).name || '')
+      : ''
+    if (requestID === antigravityModelsRequestID && errorName !== 'AbortError') {
+      antigravityModelIDs.value = []
+    }
+  } finally {
+    if (requestID === antigravityModelsRequestID) {
+      antigravityModelsController = null
+    }
+  }
+}
+
 async function loadCodexModelManifest() {
   if (!showCodexModelCatalog.value || !props.apiKey) return
 
@@ -735,13 +783,19 @@ const currentFiles = computed((): FileConfig[] => {
       if (activeClientTab.value === 'codex') {
         return generateRoutedCodexFiles(apiBase, apiKey, 'gemini')
       }
-      return [generateGeminiCliContent(baseUrl, apiKey)]
+      return [generateGeminiCliContent(baseUrl, apiKey, 'gemini-2.0-flash')]
     case 'antigravity':
       if (activeClientTab.value === 'codex') {
         return generateRoutedCodexFiles(apiBase, apiKey, 'antigravity')
       }
       if (activeClientTab.value === 'gemini') {
-        return [generateGeminiCliContent(`${baseUrl}/antigravity`, apiKey)]
+        return [
+          generateGeminiCliContent(
+            `${baseUrl}/antigravity`,
+            apiKey,
+            antigravityModelIDs.value.find((modelID) => modelID.startsWith('gemini-')) ?? ''
+          )
+        ]
       }
       return generateAnthropicFiles(`${baseUrl}/antigravity`, apiKey)
     case 'grok':
@@ -877,8 +931,7 @@ function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] 
   ]
 }
 
-function generateGeminiCliContent(baseUrl: string, apiKey: string): FileConfig {
-  const model = 'gemini-2.0-flash'
+function generateGeminiCliContent(baseUrl: string, apiKey: string, model: string): FileConfig {
   const modelComment = t('keys.useKeyModal.gemini.modelComment')
   let path: string
   let content: string
@@ -887,31 +940,42 @@ function generateGeminiCliContent(baseUrl: string, apiKey: string): FileConfig {
   switch (activeTab.value) {
     case 'unix':
       path = 'Terminal'
-      content = `export GOOGLE_GEMINI_BASE_URL="${baseUrl}"
-export GEMINI_API_KEY="${apiKey}"
-export GEMINI_MODEL="${model}"  # ${modelComment}`
-      highlighted = `${keyword('export')} ${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(`"${baseUrl}"`)}
-${keyword('export')} ${variable('GEMINI_API_KEY')}${operator('=')}${string(`"${apiKey}"`)}
-${keyword('export')} ${variable('GEMINI_MODEL')}${operator('=')}${string(`"${model}"`)}  ${comment(`# ${modelComment}`)}`
+      content = [
+        `export GOOGLE_GEMINI_BASE_URL="${baseUrl}"`,
+        `export GEMINI_API_KEY="${apiKey}"`,
+        model ? `export GEMINI_MODEL="${model}"  # ${modelComment}` : ''
+      ].filter(Boolean).join('\n')
+      highlighted = [
+        `${keyword('export')} ${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(`"${baseUrl}"`)}`,
+        `${keyword('export')} ${variable('GEMINI_API_KEY')}${operator('=')}${string(`"${apiKey}"`)}`,
+        model ? `${keyword('export')} ${variable('GEMINI_MODEL')}${operator('=')}${string(`"${model}"`)}  ${comment(`# ${modelComment}`)}` : ''
+      ].filter(Boolean).join('\n')
       break
     case 'cmd':
       path = 'Command Prompt'
-      content = `set GOOGLE_GEMINI_BASE_URL=${baseUrl}
-set GEMINI_API_KEY=${apiKey}
-set GEMINI_MODEL=${model}`
-      highlighted = `${keyword('set')} ${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(baseUrl)}
-${keyword('set')} ${variable('GEMINI_API_KEY')}${operator('=')}${string(apiKey)}
-${keyword('set')} ${variable('GEMINI_MODEL')}${operator('=')}${string(model)}
-${comment(`REM ${modelComment}`)}`
+      content = [
+        `set GOOGLE_GEMINI_BASE_URL=${baseUrl}`,
+        `set GEMINI_API_KEY=${apiKey}`,
+        model ? `set GEMINI_MODEL=${model}` : ''
+      ].filter(Boolean).join('\n')
+      highlighted = [
+        `${keyword('set')} ${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(baseUrl)}`,
+        `${keyword('set')} ${variable('GEMINI_API_KEY')}${operator('=')}${string(apiKey)}`,
+        model ? `${keyword('set')} ${variable('GEMINI_MODEL')}${operator('=')}${string(model)}\n${comment(`REM ${modelComment}`)}` : ''
+      ].filter(Boolean).join('\n')
       break
     case 'powershell':
       path = 'PowerShell'
-      content = `$env:GOOGLE_GEMINI_BASE_URL="${baseUrl}"
-$env:GEMINI_API_KEY="${apiKey}"
-$env:GEMINI_MODEL="${model}"  # ${modelComment}`
-      highlighted = `${keyword('$env:')}${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(`"${baseUrl}"`)}
-${keyword('$env:')}${variable('GEMINI_API_KEY')}${operator('=')}${string(`"${apiKey}"`)}
-${keyword('$env:')}${variable('GEMINI_MODEL')}${operator('=')}${string(`"${model}"`)}  ${comment(`# ${modelComment}`)}`
+      content = [
+        `$env:GOOGLE_GEMINI_BASE_URL="${baseUrl}"`,
+        `$env:GEMINI_API_KEY="${apiKey}"`,
+        model ? `$env:GEMINI_MODEL="${model}"  # ${modelComment}` : ''
+      ].filter(Boolean).join('\n')
+      highlighted = [
+        `${keyword('$env:')}${variable('GOOGLE_GEMINI_BASE_URL')}${operator('=')}${string(`"${baseUrl}"`)}`,
+        `${keyword('$env:')}${variable('GEMINI_API_KEY')}${operator('=')}${string(`"${apiKey}"`)}`,
+        model ? `${keyword('$env:')}${variable('GEMINI_MODEL')}${operator('=')}${string(`"${model}"`)}  ${comment(`# ${modelComment}`)}` : ''
+      ].filter(Boolean).join('\n')
       break
     default:
       path = 'Terminal'
@@ -1214,14 +1278,15 @@ function generateRoutedCodexFiles(
     openai: 'gpt-5.5',
     anthropic: 'claude-sonnet-4-6',
     gemini: 'gemini-2.5-pro',
-    antigravity: 'claude-sonnet-4-6',
     grok: 'grok-4.5',
     kimi: 'kimi-k2.5',
     zhipu: 'glm-4.7',
     deepseek: 'deepseek-v4-pro',
     composite: 'gpt-5.5'
   }
-  const preferredModel = preferredModels[platform] || ''
+  const preferredModel = platform === 'antigravity'
+    ? antigravityModelIDs.value[0] || ''
+    : preferredModels[platform] || ''
   const model = selectCodexCatalogModel(preferredModel)
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
@@ -1295,6 +1360,16 @@ responses_websockets_v2 = true
 goals = true`
 
   return buildOpenAICodexFileConfigs(configDir, configContent, apiKey)
+}
+
+function antigravityOpenCodeModels(protocol: 'anthropic' | 'gemini') {
+  // decision: Gemini receives Gemini IDs and Anthropic receives every remaining
+  // live ID; not a Claude-name allowlist because upstream may add other IDs.
+  return Object.fromEntries(
+    antigravityModelIDs.value
+      .filter((modelID) => protocol === 'gemini' ? modelID.startsWith('gemini-') : !modelID.startsWith('gemini-'))
+      .map((modelID) => [modelID, { name: modelID }])
+  )
 }
 
 function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: string, pathLabel?: string): FileConfig {
@@ -1569,267 +1644,9 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
     }
   }
 
-  const antigravityGeminiModels = {
-    'gemini-2.5-flash': {
-      name: 'Gemini 2.5 Flash',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'disable'
-        }
-      }
-    },
-    'gemini-2.5-flash-lite': {
-      name: 'Gemini 2.5 Flash Lite',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-2.5-flash-thinking': {
-      name: 'Gemini 2.5 Flash (Thinking)',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-3-flash': {
-      name: 'Gemini 3 Flash',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-3.1-pro-low': {
-      name: 'Gemini 3.1 Pro Low',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-3.1-pro-high': {
-      name: 'Gemini 3.1 Pro High',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-3.7-flash': {
-      name: 'Gemini 3.7 Flash',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      }
-    },
-    'gemini-3.7-flash-high': {
-      name: 'Gemini 3.7 Flash High',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      }
-    },
-    'gemini-3.7-flash-medium': {
-      name: 'Gemini 3.7 Flash Medium',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      }
-    },
-    'gemini-3.7-flash-low': {
-      name: 'Gemini 3.7 Flash Low',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      }
-    },
-    'gemini-3.7-flash-tiered': {
-      name: 'Gemini 3.7 Flash Tiered',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      }
-    },
-    'gemini-2.5-flash-image': {
-      name: 'Gemini 2.5 Flash Image',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image'],
-        output: ['image']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'gemini-3.1-flash-image': {
-      name: 'Gemini 3.1 Flash Image',
-      limit: {
-        context: 1048576,
-        output: 65536
-      },
-      modalities: {
-        input: ['text', 'image'],
-        output: ['image']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    }
-  }
-  const claudeModels = {
-    'claude-fable-5-1': {
-      name: 'Claude Fable 5.1',
-      limit: {
-        context: 1048576,
-        output: 128000
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          type: 'adaptive'
-        }
-      }
-    },
-    'claude-fable-5': {
-      name: 'Claude Fable 5',
-      limit: {
-        context: 1048576,
-        output: 128000
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          type: 'adaptive'
-        }
-      }
-    },
-    'claude-opus-4-6-thinking': {
-      name: 'Claude 4.6 Opus (Thinking)',
-      limit: {
-        context: 200000,
-        output: 128000
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    },
-    'claude-sonnet-4-6': {
-      name: 'Claude 4.6 Sonnet',
-      limit: {
-        context: 200000,
-        output: 64000
-      },
-      modalities: {
-        input: ['text', 'image', 'pdf'],
-        output: ['text']
-      },
-      options: {
-        thinking: {
-          budgetTokens: 24576,
-          type: 'enabled'
-        }
-      }
-    }
-  }
+  const antigravityGeminiModels = antigravityOpenCodeModels('gemini')
+  const claudeModels = antigravityOpenCodeModels('anthropic')
+
   // Align context_window with Grok Build official sample (docs.x.ai/build/settings) where known.
   // Image/video: grok-imagine-image / grok-imagine-video on media endpoints — not this list.
   const grokModels = {

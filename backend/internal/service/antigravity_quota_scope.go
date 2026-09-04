@@ -22,12 +22,6 @@ func normalizeAntigravityModelName(model string) string {
 	return normalized
 }
 
-// resolveAntigravityModelKey 根据请求的模型名解析限流 key
-// 返回空字符串表示无法解析
-func resolveAntigravityModelKey(requestedModel string) string {
-	return normalizeAntigravityModelName(requestedModel)
-}
-
 // IsSchedulableForModel 结合模型级限流判断是否可调度。
 // 保持旧签名以兼容既有调用方；默认使用 context.Background()。
 func (a *Account) IsSchedulableForModel(requestedModel string) bool {

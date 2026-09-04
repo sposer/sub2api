@@ -652,7 +652,7 @@ func (s *SettingService) GetFallbackModel(ctx context.Context, platform string) 
 		defaultModel = "gemini-2.5-pro"
 	case PlatformAntigravity:
 		key = SettingKeyFallbackModelAntigravity
-		defaultModel = "gemini-2.5-pro"
+		defaultModel = ""
 	default:
 		return ""
 	}

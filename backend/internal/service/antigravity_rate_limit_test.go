@@ -196,6 +196,7 @@ func TestHandleUpstreamError_429_NonModelRateLimit(t *testing.T) {
 	repo := &stubAntigravityAccountRepo{}
 	svc := &AntigravityGatewayService{accountRepo: repo}
 	account := &Account{ID: 2, Name: "acc-2", Platform: PlatformAntigravity}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}})
 
 	// 429 + 普通限流响应（无 RATE_LIMIT_EXCEEDED reason）→ 走模型级限流兜底
 	body := buildGeminiRateLimitBody("5s")
@@ -210,11 +211,16 @@ func TestHandleUpstreamError_429_NonModelRateLimit(t *testing.T) {
 }
 
 // TestHandleUpstreamError_429_NonModelRateLimit_UsesMappedModelKey 测试 429 非模型限流场景
-// 验证：requestedModel 会被映射到 Antigravity 最终模型（例如 claude-opus-4-6 -> claude-opus-4-6-thinking）
+// 验证：requestedModel 会按账号显式映射写入 Antigravity 最终模型 key。
 func TestHandleUpstreamError_429_NonModelRateLimit_UsesMappedModelKey(t *testing.T) {
 	repo := &stubAntigravityAccountRepo{}
 	svc := &AntigravityGatewayService{accountRepo: repo}
-	account := &Account{ID: 20, Name: "acc-20", Platform: PlatformAntigravity}
+	account := &Account{
+		ID: 20, Name: "acc-20", Platform: PlatformAntigravity,
+		Credentials: map[string]any{"model_mapping": map[string]any{
+			"claude-opus-4-6": "claude-opus-4-6-thinking",
+		}},
+	}
 
 	body := buildGeminiRateLimitBody("5s")
 
@@ -914,6 +920,9 @@ func TestAntigravityRetryLoop_PreCheck_SwitchesWhenRateLimited(t *testing.T) {
 		Status:      StatusActive,
 		Concurrency: 1,
 		Extra: map[string]any{
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limit_reset_at": time.Now().Add(2 * time.Second).Format(time.RFC3339),
@@ -957,6 +966,9 @@ func TestAntigravityRetryLoop_PreCheck_SwitchesWhenRemainingLong(t *testing.T) {
 		Status:      StatusActive,
 		Concurrency: 1,
 		Extra: map[string]any{
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limit_reset_at": time.Now().Add(11 * time.Second).Format(time.RFC3339),
@@ -1290,4 +1302,27 @@ func TestNormalizeAntigravityModelName(t *testing.T) {
 			require.Equal(t, tt.expected, actual)
 		})
 	}
+}
+
+func TestHandleUpstreamError_429_NonModelRateLimit_UnresolvedModelUsesAccountLimit(t *testing.T) {
+	repo := &stubAntigravityAccountRepo{}
+	svc := &AntigravityGatewayService{accountRepo: repo}
+	account := &Account{ID: 21, Name: "acc-21", Platform: PlatformAntigravity}
+
+	result := svc.handleUpstreamError(
+		context.Background(),
+		"[test]",
+		account,
+		http.StatusTooManyRequests,
+		http.Header{},
+		buildGeminiRateLimitBody("5s"),
+		"model-not-in-catalog",
+		0,
+		"",
+		false,
+	)
+
+	require.Nil(t, result)
+	require.Empty(t, repo.modelRateLimitCalls)
+	require.Len(t, repo.rateCalls, 1)
 }

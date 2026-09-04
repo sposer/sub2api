@@ -251,7 +251,7 @@ func TestBuildAntigravityCompatGeminiBody_ConfiguresMixedToolInvocations(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			claudeBody := []byte(`{"messages":[{"role":"user","content":"hello"}],"tools":` + tt.tools + `}`)
 			claudeBody = bytes.ReplaceAll(claudeBody, []byte{92}, nil)
-			body, err := svc.buildAntigravityCompatGeminiBody(context.Background(), claudeBody, nil, "project-1", "gemini-2.5-flash")
+			body, err := svc.buildAntigravityCompatGeminiBody(context.Background(), claudeBody, nil, "project-1", "gemini-2.5-flash", true)
 			require.NoError(t, err)
 
 			var wrapped map[string]any
@@ -291,11 +291,13 @@ func TestAntigravityCompatChatMixedBuiltInToolsEnableServerSideInvocations(t *te
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, "gemini-3.1-pro-high", result.UpstreamModel)
 	require.Len(t, upstream.requestBodies, 1)
 	requestBody := upstream.requestBodies[0]
+	require.Equal(t, "gemini-3.1-pro-high", gjson.GetBytes(requestBody, "model").String())
 	require.True(t, gjson.GetBytes(requestBody, "request.toolConfig.includeServerSideToolInvocations").Bool())
 	require.Len(t, gjson.GetBytes(requestBody, "request.tools.0.functionDeclarations").Array(), 2)
-	require.True(t, gjson.GetBytes(requestBody, "request.tools.1.googleSearch").Exists())
+	require.True(t, gjson.GetBytes(requestBody, "request.tools.1.googleSearch").Exists(), string(requestBody))
 	require.True(t, gjson.GetBytes(requestBody, "request.tools.2.codeExecution").Exists())
 }
 

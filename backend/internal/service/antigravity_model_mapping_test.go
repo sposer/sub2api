@@ -8,265 +8,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAntigravityGatewayService_GetMappedModel(t *testing.T) {
-	svc := &AntigravityGatewayService{}
-
-	tests := []struct {
-		name           string
-		requestedModel string
-		accountMapping map[string]string
-		expected       string
-	}{
-		// 1. 账户级映射优先
-		{
-			name:           "账户映射优先",
-			requestedModel: "claude-3-5-sonnet-20241022",
-			accountMapping: map[string]string{"claude-3-5-sonnet-20241022": "custom-model"},
-			expected:       "custom-model",
-		},
-		{
-			name:           "账户映射 - 可覆盖默认映射的模型",
-			requestedModel: "claude-sonnet-4-5",
-			accountMapping: map[string]string{"claude-sonnet-4-5": "my-custom-sonnet"},
-			expected:       "my-custom-sonnet",
-		},
-		{
-			name:           "账户映射 - 可覆盖未知模型",
-			requestedModel: "claude-opus-4",
-			accountMapping: map[string]string{"claude-opus-4": "my-opus"},
-			expected:       "my-opus",
-		},
-
-		// 2. 默认映射（DefaultAntigravityModelMapping）
-		{
-			name:           "默认映射 - claude-opus-4-6 → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-6",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-opus-4-5-20251101 → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-5-20251101",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-opus-4-5-thinking → claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-5-thinking",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-haiku-4-5 → claude-sonnet-4-6",
-			requestedModel: "claude-haiku-4-5",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "默认映射 - claude-haiku-4-5-20251001 → claude-sonnet-4-6",
-			requestedModel: "claude-haiku-4-5-20251001",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "默认映射 - claude-sonnet-4-5-20250929 → claude-sonnet-4-6",
-			requestedModel: "claude-sonnet-4-5-20250929",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-
-		// 3. 默认映射中的透传（映射到自己）
-		{
-			name:           "默认映射透传 - claude-fable-5-1",
-			requestedModel: "claude-fable-5-1",
-			accountMapping: nil,
-			expected:       "claude-fable-5-1",
-		},
-		{
-			name:           "默认映射透传 - claude-fable-5",
-			requestedModel: "claude-fable-5",
-			accountMapping: nil,
-			expected:       "claude-fable-5",
-		},
-		{
-			name:           "默认映射透传 - claude-sonnet-4-6",
-			requestedModel: "claude-sonnet-4-6",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "显式 canonical 选择 - claude-sonnet-4-5 透传",
-			requestedModel: "claude-sonnet-4-5",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-5",
-		},
-		{
-			name:           "默认映射透传 - claude-opus-4-8",
-			requestedModel: "claude-opus-4-8",
-			accountMapping: nil,
-			expected:       "claude-opus-4-8",
-		},
-		{
-			name:           "默认映射透传 - claude-opus-4-7",
-			requestedModel: "claude-opus-4-7",
-			accountMapping: nil,
-			expected:       "claude-opus-4-7",
-		},
-		{
-			name:           "默认映射透传 - claude-opus-4-6-thinking",
-			requestedModel: "claude-opus-4-6-thinking",
-			accountMapping: nil,
-			expected:       "claude-opus-4-6-thinking",
-		},
-		{
-			name:           "默认映射 - claude-sonnet-4-5-thinking → claude-sonnet-4-6",
-			requestedModel: "claude-sonnet-4-5-thinking",
-			accountMapping: nil,
-			expected:       "claude-sonnet-4-6",
-		},
-		{
-			name:           "账户显式目标只映射一步 - custom-sonnet → claude-sonnet-4-5",
-			requestedModel: "custom-sonnet",
-			accountMapping: map[string]string{
-				"custom-sonnet":     "claude-sonnet-4-5",
-				"claude-sonnet-4-5": "claude-sonnet-4-6",
+func TestAntigravityGatewayService_GetMappedModel_ExplicitRestriction(t *testing.T) {
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"public-model": "gemini-9.9-flash-high",
 			},
-			expected: "claude-sonnet-4-5",
-		},
-		{
-			name:           "默认映射透传 - gemini-2.5-flash",
-			requestedModel: "gemini-2.5-flash",
-			accountMapping: nil,
-			expected:       "gemini-2.5-flash",
-		},
-		{
-			name:           "默认映射透传 - gemini-2.5-pro",
-			requestedModel: "gemini-2.5-pro",
-			accountMapping: nil,
-			expected:       "gemini-2.5-pro",
-		},
-		{
-			name:           "默认映射透传 - gemini-3-flash",
-			requestedModel: "gemini-3-flash",
-			accountMapping: nil,
-			expected:       "gemini-3-flash",
-		},
-
-		// 4. 未在默认映射中的模型返回空字符串（不支持）
-		{
-			name:           "未知模型 - claude-unknown 返回空",
-			requestedModel: "claude-unknown",
-			accountMapping: nil,
-			expected:       "",
-		},
-		{
-			name:           "未知模型 - claude-3-5-sonnet-20241022 返回空（未在默认映射）",
-			requestedModel: "claude-3-5-sonnet-20241022",
-			accountMapping: nil,
-			expected:       "",
-		},
-		{
-			name:           "未知模型 - claude-3-opus-20240229 返回空",
-			requestedModel: "claude-3-opus-20240229",
-			accountMapping: nil,
-			expected:       "",
-		},
-		{
-			name:           "未知模型 - claude-opus-4 返回空",
-			requestedModel: "claude-opus-4",
-			accountMapping: nil,
-			expected:       "",
-		},
-		{
-			name:           "未知模型 - gemini-future-model 返回空",
-			requestedModel: "gemini-future-model",
-			accountMapping: nil,
-			expected:       "",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			account := &Account{
-				Platform: PlatformAntigravity,
-			}
-			if tt.accountMapping != nil {
-				// GetModelMapping 期望 model_mapping 是 map[string]any 格式
-				mappingAny := make(map[string]any)
-				for k, v := range tt.accountMapping {
-					mappingAny[k] = v
-				}
-				account.Credentials = map[string]any{
-					"model_mapping": mappingAny,
-				}
-			}
-
-			got := svc.getMappedModel(account, tt.requestedModel)
-			require.Equal(t, tt.expected, got, "model: %s", tt.requestedModel)
-		})
-	}
+	require.Equal(t, "gemini-9.9-flash-high", mapAntigravityModel(account, "public-model"))
+	require.Empty(t, mapAntigravityModel(account, "gemini-9.9-flash-high"))
 }
 
-func TestAntigravityGatewayService_GetMappedModel_EdgeCases(t *testing.T) {
-	svc := &AntigravityGatewayService{}
+func TestAntigravityGatewayService_GetMappedModel_UsesLiveCatalog(t *testing.T) {
+	account := &Account{Platform: PlatformAntigravity}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Source: "upstream",
+		Models: []string{
+			"gemini-9.9-flash-high",
+			"gemini-9.9-flash-low",
+			"gemini-9.9-flash-medium",
+			"gemini-9.9-flash-tiered",
+			"gpt-oss-future",
+		},
+	})
 
-	tests := []struct {
-		name           string
-		requestedModel string
-		expected       string
-	}{
-		// 空字符串和非 claude/gemini 前缀返回空字符串
-		{"空字符串", "", ""},
-		{"非claude/gemini前缀 - gpt", "gpt-4", ""},
-		{"非claude/gemini前缀 - llama", "llama-3", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			account := &Account{Platform: PlatformAntigravity}
-			got := svc.getMappedModel(account, tt.requestedModel)
-			require.Equal(t, tt.expected, got)
-		})
-	}
+	require.Equal(t, "gemini-9.9-flash-medium", mapAntigravityModel(account, "gemini-9.9-flash"))
+	require.Equal(t, "gemini-9.9-flash-high", mapAntigravityModel(account, "models/gemini-9.9-flash-high"))
+	require.Equal(t, "gpt-oss-future", mapAntigravityModel(account, "gpt-oss-future"))
+	require.Empty(t, mapAntigravityModel(account, "gemini-not-in-catalog"))
 }
 
-func TestAntigravityGatewayService_IsModelSupported(t *testing.T) {
-	svc := &AntigravityGatewayService{}
+func TestAntigravityGatewayService_GetMappedModel_RequiresExplicitMappingOrLiveCatalog(t *testing.T) {
+	account := &Account{Platform: PlatformAntigravity}
 
-	tests := []struct {
-		name     string
-		model    string
-		expected bool
-	}{
-		// 直接支持
-		{"直接支持 - claude-fable-5-1", "claude-fable-5-1", true},
-		{"直接支持 - claude-fable-5", "claude-fable-5", true},
-		{"直接支持 - claude-sonnet-4-5", "claude-sonnet-4-5", true},
-		{"直接支持 - gemini-3-flash", "gemini-3-flash", true},
-
-		// 可映射（有明确前缀映射）
-		{"可映射 - claude-opus-4-8", "claude-opus-4-8", true},
-		{"可映射 - claude-opus-4-6", "claude-opus-4-6", true},
-
-		// 前缀透传（claude 和 gemini 前缀）
-		{"Gemini前缀", "gemini-unknown", true},
-		{"Claude前缀", "claude-unknown", true},
-
-		// 不支持
-		{"不支持 - gpt-4", "gpt-4", false},
-		{"不支持 - 空字符串", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := svc.IsModelSupported(tt.model)
-			require.Equal(t, tt.expected, got)
-		})
-	}
+	require.Empty(t, mapAntigravityModel(account, "future-upstream-model"))
+	require.Empty(t, mapAntigravityModel(account, "claude-opus-4-6"))
+	require.Empty(t, mapAntigravityModel(account, ""))
 }
 
-// TestMapAntigravityModel_WildcardTargetEqualsRequest 测试通配符映射目标恰好等于请求模型名的 edge case
-// 例如 {"claude-*": "claude-sonnet-4-5"}，请求 "claude-sonnet-4-5" 时应该通过
 func TestMapAntigravityModel_WildcardTargetEqualsRequest(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -298,18 +80,6 @@ func TestMapAntigravityModel_WildcardTargetEqualsRequest(t *testing.T) {
 			requestedModel: "claude-sonnet-4-5",
 			expected:       "claude-sonnet-4-5",
 		},
-		{
-			name:           "multiple wildcards target equals one request",
-			modelMapping:   map[string]any{"claude-*": "claude-sonnet-4-5", "gemini-*": "gemini-2.5-flash"},
-			requestedModel: "gemini-2.5-flash",
-			expected:       "gemini-2.5-flash",
-		},
-		{
-			name:           "customtools alias falls back to normalized preview mapping",
-			modelMapping:   map[string]any{"gemini-3.1-pro-preview": "gemini-3.1-pro-high"},
-			requestedModel: "gemini-3.1-pro-preview-customtools",
-			expected:       "gemini-3.1-pro-high",
-		},
 	}
 
 	for _, tt := range tests {
@@ -320,8 +90,19 @@ func TestMapAntigravityModel_WildcardTargetEqualsRequest(t *testing.T) {
 					"model_mapping": tt.modelMapping,
 				},
 			}
-			got := mapAntigravityModel(account, tt.requestedModel)
-			require.Equal(t, tt.expected, got, "mapAntigravityModel(%q) = %q, want %q", tt.requestedModel, got, tt.expected)
+			require.Equal(t, tt.expected, mapAntigravityModel(account, tt.requestedModel))
 		})
 	}
+}
+
+func TestAccountIsModelSupported_AntigravityUsesExplicitMappingOrLiveCatalog(t *testing.T) {
+	account := &Account{Platform: PlatformAntigravity}
+	require.False(t, account.IsModelSupported("future-upstream-model"))
+
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Models: []string{"gemini-9.9-flash-high", "gemini-9.9-flash-medium", "gemini-9.9-flash-low"},
+	})
+	require.True(t, account.IsModelSupported("gemini-9.9-flash"))
+	require.True(t, account.IsModelSupported("models/gemini-9.9-flash-high"))
+	require.False(t, account.IsModelSupported("gemini-stale"))
 }

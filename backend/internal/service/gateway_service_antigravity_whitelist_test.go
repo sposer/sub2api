@@ -40,31 +40,27 @@ func TestGatewayService_isModelSupportedByAccount_AntigravityModelMapping(t *tes
 	// 其他平台模型不支持
 	require.False(t, svc.isModelSupportedByAccount(account, "gpt-4"))
 
-	// 空模型允许
-	require.True(t, svc.isModelSupportedByAccount(account, ""))
+	// 空值不是目录模型
+	require.False(t, svc.isModelSupportedByAccount(account, ""))
 }
 
-func TestGatewayService_isModelSupportedByAccount_AntigravityNoMapping(t *testing.T) {
+func TestGatewayService_isModelSupportedByAccount_AntigravityUsesLiveCatalog(t *testing.T) {
 	svc := &GatewayService{}
+	account := &Account{Platform: PlatformAntigravity, Credentials: map[string]any{}}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Source: "upstream",
+		Models: []string{
+			"claude-sonnet-4-6",
+			"gemini-9.9-flash-high",
+			"gemini-9.9-flash-low",
+			"gemini-9.9-flash-medium",
+		},
+	})
 
-	// 未配置 model_mapping 时，使用默认映射（domain.DefaultAntigravityModelMapping）
-	// 只有默认映射中的模型才被支持
-	account := &Account{
-		Platform:    PlatformAntigravity,
-		Credentials: map[string]any{},
-	}
-
-	// 默认映射中的模型应该被支持
-	require.True(t, svc.isModelSupportedByAccount(account, "claude-sonnet-4-5"))
-	require.True(t, svc.isModelSupportedByAccount(account, "gemini-3-flash"))
-	require.True(t, svc.isModelSupportedByAccount(account, "gemini-2.5-pro"))
-	require.True(t, svc.isModelSupportedByAccount(account, "claude-haiku-4-5"))
-
-	// 不在默认映射中的模型不被支持
-	require.False(t, svc.isModelSupportedByAccount(account, "claude-3-5-sonnet-20241022"))
-	require.False(t, svc.isModelSupportedByAccount(account, "claude-unknown-model"))
-
-	// 非 claude-/gemini- 前缀仍然不支持
+	require.True(t, svc.isModelSupportedByAccount(account, "claude-sonnet-4-6"))
+	require.True(t, svc.isModelSupportedByAccount(account, "gemini-9.9-flash"))
+	require.True(t, svc.isModelSupportedByAccount(account, "gemini-9.9-flash-high"))
+	require.False(t, svc.isModelSupportedByAccount(account, "gemini-not-in-catalog"))
 	require.False(t, svc.isModelSupportedByAccount(account, "gpt-4"))
 }
 
@@ -177,8 +173,7 @@ func TestGatewayService_isModelSupportedByAccountWithContext_ThinkingMode(t *tes
 	}
 }
 
-// TestGatewayService_isModelSupportedByAccount_CustomMappingNotInDefault 测试自定义模型映射中
-// 不在 DefaultAntigravityModelMapping 中的模型能通过调度
+// TestGatewayService_isModelSupportedByAccount_CustomMappingNotInDefault 测试显式自定义模型映射。
 func TestGatewayService_isModelSupportedByAccount_CustomMappingNotInDefault(t *testing.T) {
 	svc := &GatewayService{}
 
@@ -195,7 +190,7 @@ func TestGatewayService_isModelSupportedByAccount_CustomMappingNotInDefault(t *t
 		},
 	}
 
-	// 自定义模型应该通过（不在 DefaultAntigravityModelMapping 中也可以）
+	// 显式自定义模型应该通过。
 	require.True(t, svc.isModelSupportedByAccount(account, "my-custom-model"))
 	require.True(t, svc.isModelSupportedByAccount(account, "gpt-4o"))
 	require.True(t, svc.isModelSupportedByAccount(account, "llama-3-70b"))
@@ -205,8 +200,8 @@ func TestGatewayService_isModelSupportedByAccount_CustomMappingNotInDefault(t *t
 	require.False(t, svc.isModelSupportedByAccount(account, "gpt-3.5-turbo"))
 	require.False(t, svc.isModelSupportedByAccount(account, "unknown-model"))
 
-	// 空模型允许
-	require.True(t, svc.isModelSupportedByAccount(account, ""))
+	// 空值不是目录模型
+	require.False(t, svc.isModelSupportedByAccount(account, ""))
 }
 
 // TestGatewayService_isModelSupportedByAccountWithContext_CustomMappingThinking

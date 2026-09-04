@@ -307,6 +307,11 @@ const syncUpstreamModels = async () => {
       return
     }
 
+    if (result.availability_source !== 'live') {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsLiveUnavailable'))
+      return
+    }
+
     const upstreamModels = result.models.map(model => model.trim()).filter(Boolean)
     if (upstreamModels.length === 0) {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))

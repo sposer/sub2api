@@ -621,10 +621,6 @@ func (a *Account) GetModelMapping() map[string]string {
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {
 	if a.Credentials == nil {
-		// Antigravity 平台使用默认映射
-		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
-		}
 		if a.Platform == domain.PlatformGrok {
 			return xai.DefaultModelMapping()
 		}
@@ -634,10 +630,6 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 	if len(rawMapping) == 0 {
 		if a.IsGeminiGoogleOne() {
 			return geminicli.GoogleOneModelMapping()
-		}
-		// Antigravity 平台使用默认映射
-		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
 		}
 		if a.Platform == domain.PlatformGrok {
 			return xai.DefaultModelMapping()
@@ -653,32 +645,13 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 	}
 	if len(result) > 0 {
 		if a.Platform == domain.PlatformAntigravity {
-			ensureAntigravityDefaultPassthroughs(result, []string{
-				"gemini-3-flash",
-				"gemini-3.1-pro-high",
-				"gemini-3.1-pro-low",
-				"gemini-3.6-flash",
-				"gemini-3.6-flash-high",
-				"gemini-3.6-flash-low",
-				"gemini-3.6-flash-medium",
-				"gemini-3.6-flash-tiered",
-				"gemini-3.7-flash-high",
-				"gemini-3.7-flash-low",
-				"gemini-3.7-flash-medium",
-				"gemini-3.7-flash-tiered",
-			})
-			ensureAntigravityDefaultMapping(result, "gemini-3.7-flash", "gemini-3.7-flash-medium")
-			applyAntigravityGemini31ProAliases(result)
+			addAntigravityTierAliases(result)
 		}
 		return result
 	}
 
-	// Antigravity 平台使用默认映射
 	if a.IsGeminiGoogleOne() {
 		return geminicli.GoogleOneModelMapping()
-	}
-	if a.Platform == domain.PlatformAntigravity {
-		return domain.DefaultAntigravityModelMapping
 	}
 	if a.Platform == domain.PlatformGrok {
 		return xai.DefaultModelMapping()
@@ -717,74 +690,36 @@ func modelMappingSignature(rawMapping map[string]any) uint64 {
 	return h.Sum64()
 }
 
-func ensureAntigravityDefaultMapping(mapping map[string]string, model, target string) {
-	if mapping == nil || model == "" || target == "" {
+func addAntigravityTierAliases(mapping map[string]string) {
+	if len(mapping) == 0 {
 		return
 	}
-	if _, exists := mapping[model]; exists {
-		return
-	}
-	for pattern := range mapping {
-		if matchWildcard(pattern, model) {
-			return
+
+	identityModels := make(map[string]struct{}, len(mapping))
+	for model, target := range mapping {
+		if strings.TrimSpace(model) == strings.TrimSpace(target) {
+			identityModels[model] = struct{}{}
 		}
 	}
-	mapping[model] = target
-}
 
-func ensureAntigravityDefaultPassthrough(mapping map[string]string, model string) {
-	ensureAntigravityDefaultMapping(mapping, model, model)
-}
-
-func ensureAntigravityDefaultPassthroughs(mapping map[string]string, models []string) {
-	for _, model := range models {
-		ensureAntigravityDefaultPassthrough(mapping, model)
-	}
-}
-
-func applyAntigravityGemini31ProAliases(mapping map[string]string) {
-	target := strings.TrimSpace(mapping[domain.AntigravityGemini31ProAgentModel])
-	if target == "" {
-		return
-	}
-
-	aliases := []struct {
-		model         string
-		legacyTargets map[string]struct{}
-	}{
-		{
-			model: "gemini-3.1-pro",
-			legacyTargets: map[string]struct{}{
-				"gemini-3.1-pro": {},
-			},
-		},
-		{
-			model: "gemini-3.1-pro-high",
-			legacyTargets: map[string]struct{}{
-				"gemini-3.1-pro-high": {},
-			},
-		},
-		{
-			model: "gemini-3.1-pro-preview",
-			legacyTargets: map[string]struct{}{
-				"gemini-3.1-pro-preview": {},
-				"gemini-3.1-pro-high":    {},
-			},
-		},
-	}
-
-	for _, alias := range aliases {
-		current, exists := mapping[alias.model]
-		if exists {
-			if _, legacy := alias.legacyTargets[current]; legacy {
-				mapping[alias.model] = target
-			}
+	for model := range identityModels {
+		if !strings.HasPrefix(model, "gemini-") || !strings.HasSuffix(model, "-medium") {
 			continue
 		}
-		if mappingHasWildcardForModel(mapping, alias.model) {
+		base := strings.TrimSuffix(model, "-medium")
+		if !strings.HasSuffix(base, "-flash") {
 			continue
 		}
-		mapping[alias.model] = target
+		if _, hasHigh := identityModels[base+"-high"]; !hasHigh {
+			continue
+		}
+		if _, hasLow := identityModels[base+"-low"]; !hasLow {
+			continue
+		}
+		if _, exists := mapping[base]; exists || mappingHasWildcardForModel(mapping, base) {
+			continue
+		}
+		mapping[base] = model
 	}
 }
 
@@ -797,12 +732,130 @@ func mappingHasWildcardForModel(mapping map[string]string, model string) bool {
 	return false
 }
 
+func (a *Account) antigravityCatalogModelMapping() map[string]string {
+	modelIDs := a.GetUpstreamModelCatalogIDs()
+	if len(modelIDs) == 0 {
+		return nil
+	}
+
+	mapping := make(map[string]string, len(modelIDs)+1)
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID != "" {
+			mapping[modelID] = modelID
+		}
+	}
+	addAntigravityTierAliases(mapping)
+	return mapping
+}
+
+// ResolveAntigravityModel applies an explicit account restriction when present;
+// otherwise it resolves only against the last live upstream catalog.
+func (a *Account) ResolveAntigravityModel(requestedModel string) (string, bool) {
+	requestedModel = strings.TrimPrefix(strings.TrimSpace(requestedModel), "models/")
+	if requestedModel == "" {
+		return "", false
+	}
+
+	if mapping := a.GetModelMapping(); len(mapping) > 0 {
+		mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel)
+		if !matched {
+			normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
+			if normalized != requestedModel {
+				mappedModel, matched = resolveRequestedModelInMapping(mapping, normalized)
+			}
+		}
+		return mappedModel, matched
+	}
+
+	if mapping := a.antigravityCatalogModelMapping(); len(mapping) > 0 {
+		mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel)
+		if !matched {
+			normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
+			if normalized != requestedModel {
+				mappedModel, matched = resolveRequestedModelInMapping(mapping, normalized)
+			}
+		}
+		return mappedModel, matched
+	}
+
+	return "", false
+}
+
+// GetAntigravityAvailableModelIDs returns explicit request-side mapping keys, or
+// the last live upstream catalog when no explicit restriction exists.
+func (a *Account) GetAntigravityAvailableModelIDs() []string {
+	mapping := a.GetModelMapping()
+	if len(mapping) == 0 {
+		mapping = a.antigravityCatalogModelMapping()
+	}
+	if len(mapping) == 0 {
+		return nil
+	}
+
+	models := make([]string, 0, len(mapping))
+	for modelID := range mapping {
+		models = append(models, modelID)
+	}
+	sort.Strings(models)
+	return models
+}
+
+// ResolveAntigravityWebSearchModel keeps an already resolved Gemini text model,
+// or selects one from the same explicit mapping/live catalog availability set.
+func (a *Account) ResolveAntigravityWebSearchModel(mappedModel string) (string, bool) {
+	if candidate, ok := antigravityWebSearchModelCandidate(mappedModel); ok {
+		return candidate, true
+	}
+
+	var baseFlashModel string
+	var flashModel string
+	var geminiModel string
+	for _, requestedModel := range a.GetAntigravityAvailableModelIDs() {
+		resolvedModel, supported := a.ResolveAntigravityModel(requestedModel)
+		if !supported {
+			continue
+		}
+		candidate, ok := antigravityWebSearchModelCandidate(resolvedModel)
+		if !ok {
+			continue
+		}
+		geminiModel = candidate
+		modelLower := strings.ToLower(candidate)
+		if strings.Contains(modelLower, "-flash") {
+			flashModel = candidate
+		}
+		if strings.HasSuffix(modelLower, "-flash") {
+			baseFlashModel = candidate
+		}
+	}
+
+	// decision: web_search selects a non-image Gemini target from the account's
+	// own availability and prefers the generic Flash family; not a fixed model ID
+	// because a static fallback can bypass a changed or restricted catalog.
+	for _, candidate := range []string{baseFlashModel, flashModel, geminiModel} {
+		if candidate != "" {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func antigravityWebSearchModelCandidate(model string) (string, bool) {
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	modelLower := strings.ToLower(model)
+	if !strings.HasPrefix(modelLower, "gemini-") || strings.Contains(modelLower, "image") {
+		return "", false
+	}
+	return model, true
+}
+
 func normalizeRequestedModelForLookup(platform, requestedModel string) string {
 	trimmed := strings.TrimSpace(requestedModel)
 	if trimmed == "" {
 		return ""
 	}
-	if platform != PlatformGemini && platform != PlatformAntigravity {
+	if platform != PlatformGemini {
 		return trimmed
 	}
 	if trimmed == "gemini-3.1-pro-preview-customtools" {
@@ -836,8 +889,8 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 	return matchWildcardMappingResult(mapping, requestedModel)
 }
 
-// IsModelSupported 检查模型是否在 model_mapping 中（支持通配符）
-// 如果未配置 mapping，返回 true（允许所有模型）。
+// IsModelSupported 检查模型是否在 model_mapping 中（支持通配符）。
+// Antigravity 只接受显式 mapping 或实时 catalog；其他平台未配置 mapping 时允许所有模型。
 //
 // 例外：OpenAI OAuth 账号（Codex 上游）的空映射会排除明确属于其他厂商
 // 家族的模型（deepseek-*/glm-* 等）——转发阶段 normalizeOpenAIModelForUpstream
@@ -845,6 +898,13 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 // 请求卡死在该账号上、无法 failover 到真正支持该模型的 API Key 账号（#3662）。
 // 未知/自定义别名仍保持允许（兼容渠道级映射），见 isOpenAIOAuthServableModel。
 func (a *Account) IsModelSupported(requestedModel string) bool {
+	// decision: Antigravity support follows explicit mapping or the live catalog;
+	// not empty-mapping passthrough because every consumer must share one availability owner.
+	if a.Platform == PlatformAntigravity {
+		_, supported := a.ResolveAntigravityModel(requestedModel)
+		return supported
+	}
+
 	// 透传模式仅替换认证、模型语义完全交由上游决定，因此放行所有模型。
 	// 该短路必须在 model_mapping 判定之前：账号从"白名单模式"切换到透传后，
 	// credentials 里常残留旧的非空 model_mapping，若不在此放行，透传账号会被

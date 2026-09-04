@@ -227,6 +227,9 @@ func TestGatewaySelectAccountWithLoadAwareness_SkipsAntigravityGeminiFamilyRateL
 				GroupIDs: []int64{22},
 				Extra: map[string]any{
 					"mixed_scheduling": true,
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+						Models: []string{"gemini-3-flash-preview"},
+					},
 					modelRateLimitsKey: map[string]any{
 						antigravityGeminiModelRateLimitKey: map[string]any{
 							"rate_limit_reset_at": resetAt,
@@ -248,12 +251,25 @@ func TestGatewaySelectAccountWithLoadAwareness_SkipsAntigravityGeminiFamilyRateL
 				GroupIDs: []int64{22},
 				Extra: map[string]any{
 					"mixed_scheduling": true,
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+						Models: []string{"gemini-3-flash-preview"},
+					},
 				},
 			},
 		},
 		accounts: map[int64]*Account{
-			1: {ID: 1, Platform: PlatformAntigravity, Type: AccountTypeOAuth},
-			2: {ID: 2, Platform: PlatformAntigravity, Type: AccountTypeOAuth},
+			1: {
+				ID: 1, Platform: PlatformAntigravity, Type: AccountTypeOAuth,
+				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-3-flash-preview"}},
+				},
+			},
+			2: {
+				ID: 2, Platform: PlatformAntigravity, Type: AccountTypeOAuth,
+				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-3-flash-preview"}},
+				},
+			},
 		},
 	}
 	groupID := int64(22)

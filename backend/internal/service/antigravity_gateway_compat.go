@@ -218,9 +218,17 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		message := fmt.Sprintf("model %s not in whitelist", request.originalModel)
 		return nil, s.writeAntigravityCompatError(c, http.StatusForbidden, "permission_error", message)
 	}
+	useGeminiNativeTransform := strings.HasPrefix(strings.ToLower(mappedModel), "gemini-")
 	thinkingEnabled := claudeRequest.Thinking != nil &&
 		(claudeRequest.Thinking.Type == "enabled" || claudeRequest.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
+	if antigravity.HasWebSearchTool(claudeRequest.Tools) {
+		webSearchModel, supported := account.ResolveAntigravityWebSearchModel(mappedModel)
+		if !supported {
+			return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "web_search requires an available Gemini model")
+		}
+		mappedModel = webSearchModel
+	}
 
 	if s.tokenProvider == nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "api_error", "Antigravity token provider not configured")
@@ -238,7 +246,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		_ = s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
 	}
-	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel)
+	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel, useGeminiNativeTransform)
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
 	}
@@ -260,8 +268,12 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	claudeRequest *antigravity.ClaudeRequest,
 	projectID string,
 	mappedModel string,
+	useGeminiNativeTransform bool,
 ) ([]byte, error) {
-	if strings.HasPrefix(strings.ToLower(mappedModel), "gemini-") {
+	// decision: preserve the conversion path selected by the originally mapped
+	// model; not the web-search target because capability routing must not change
+	// unrelated tool conversion semantics.
+	if useGeminiNativeTransform {
 		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 		if err != nil {
 			return nil, err

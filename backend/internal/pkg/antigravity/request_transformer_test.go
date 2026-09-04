@@ -392,17 +392,16 @@ func TestBuildGenerationConfig_ThinkingDynamicBudget(t *testing.T) {
 	}
 }
 
-func TestBuildGenerationConfig_Gemini37OmitsUnsupportedSamplingParameters(t *testing.T) {
+func TestBuildGenerationConfig_GeminiFlashTiersOmitUnsupportedSamplingParameters(t *testing.T) {
 	temperature := 0.7
 	topP := 0.9
 	topK := 40
 
 	for _, model := range []string{
-		"gemini-3.7-flash",
-		"gemini-3.7-flash-high",
-		"gemini-3.7-flash-low",
-		"gemini-3.7-flash-medium",
-		"gemini-3.7-flash-tiered",
+		"gemini-9.9-flash-high",
+		"gemini-9.9-flash-low",
+		"gemini-9.9-flash-medium",
+		"gemini-9.9-flash-tiered",
 	} {
 		t.Run(model, func(t *testing.T) {
 			cfg := buildGenerationConfig(&ClaudeRequest{
@@ -599,11 +598,13 @@ func TestTransformClaudeToGeminiWithOptions_PreservesWebSearchAlongsideFunctions
 		},
 	}
 
-	body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-2.5-flash", DefaultTransformOptions())
+	body, err := TransformClaudeToGeminiWithOptions(claudeReq, "project-1", "gemini-3.8-flash-medium", DefaultTransformOptions())
 	require.NoError(t, err)
 
 	var req V1InternalRequest
 	require.NoError(t, json.Unmarshal(body, &req))
+	require.Equal(t, "web_search", req.RequestType)
+	require.Equal(t, "gemini-3.8-flash-medium", req.Model)
 	require.Len(t, req.Request.Tools, 2)
 	require.Len(t, req.Request.Tools[0].FunctionDeclarations, 1)
 	require.Equal(t, "get_weather", req.Request.Tools[0].FunctionDeclarations[0].Name)

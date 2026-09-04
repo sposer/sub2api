@@ -583,6 +583,7 @@ export interface SyncUpstreamModelsResult {
   models: string[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
+  availability_source: 'live' | 'configured'
 }
 
 export interface UpstreamModelSyncWarning {
@@ -603,9 +604,10 @@ export interface UpstreamModelMetadata {
 }
 
 /**
- * Sync live supported models from the account's upstream model-list endpoint
+ * Sync supported models and report whether IDs came from the live upstream list
+ * or configured capability-enrichment fallback.
  * @param id - Account ID
- * @returns List of model IDs returned by the upstream
+ * @returns Models, metadata, warnings, and the availability source
  */
 export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
   const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
@@ -744,17 +746,6 @@ export async function importCodexSession(payload: CodexSessionImportRequest): Pr
 
 export async function createOpenAICodexPAT(payload: OpenAICodexPATCreateRequest): Promise<Account> {
   const { data } = await apiClient.post<Account>('/admin/openai/create-from-codex-pat', payload)
-  return data
-}
-
-/**
- * Get Antigravity default model mapping from backend
- * @returns Default model mapping (from -> to)
- */
-export async function getAntigravityDefaultModelMapping(): Promise<Record<string, string>> {
-  const { data } = await apiClient.get<Record<string, string>>(
-    '/admin/accounts/antigravity/default-model-mapping'
-  )
   return data
 }
 
@@ -1086,7 +1077,6 @@ export const accountsAPI = {
   importData,
   importCodexSession,
   createOpenAICodexPAT,
-  getAntigravityDefaultModelMapping,
   batchDelete,
   batchClearError,
   batchRefresh,

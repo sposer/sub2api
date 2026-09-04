@@ -46,9 +46,16 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 
-	// 强制 antigravity 模式：返回 antigravity 支持的模型列表
+	// 强制 Antigravity 模式：与同组 /v1/models 复用账号 mapping 或实时 catalog。
 	if forcePlatform == service.PlatformAntigravity {
-		c.JSON(http.StatusOK, antigravity.FallbackGeminiModelsList())
+		groupID := apiKey.GroupID
+		if apiKey.Group != nil {
+			groupID = &apiKey.Group.ID
+		}
+		modelIDs := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, service.PlatformAntigravity)
+		c.JSON(http.StatusOK, antigravity.GeminiModelsListResponse{
+			Models: antigravity.GeminiModelsFromIDs(modelIDs),
+		})
 		return
 	}
 
@@ -57,8 +64,14 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		// 没有 gemini 账户，检查是否有 antigravity 账户可用
 		hasAntigravity, _ := h.geminiCompatService.HasAntigravityAccounts(c.Request.Context(), apiKey.GroupID)
 		if hasAntigravity {
-			// antigravity 账户使用静态模型列表
-			c.JSON(http.StatusOK, gemini.FallbackModelsList())
+			groupID := apiKey.GroupID
+			if apiKey.Group != nil {
+				groupID = &apiKey.Group.ID
+			}
+			modelIDs := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, service.PlatformAntigravity)
+			c.JSON(http.StatusOK, antigravity.GeminiModelsListResponse{
+				Models: antigravity.GeminiModelsFromIDs(modelIDs),
+			})
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -93,24 +106,33 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		return
 	}
 
-	modelName := strings.TrimSpace(c.Param("model"))
-	if modelName == "" {
+	requestedModel := strings.TrimSpace(c.Param("model"))
+	if requestedModel == "" {
 		googleError(c, http.StatusBadRequest, "Missing model in URL")
 		return
 	}
 	// 模型名会被拼进上游 URL 的 path，先在入口校验片段合规性，
 	// 见 service/upstream_path_guard.go。
-	if !service.IsSafeGeminiModelPathSegment(modelName) {
+	if !service.IsSafeGeminiModelPathSegment(requestedModel) {
 		googleError(c, http.StatusBadRequest, "Invalid model in URL")
 		return
 	}
+	modelName := requestedModel
 	if resolvedModel, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context()); ok && strings.TrimSpace(resolvedModel) != "" {
 		modelName = strings.TrimSpace(resolvedModel)
 	}
 
-	// 强制 antigravity 模式：返回 antigravity 模型信息
+	groupID := apiKey.GroupID
+	if apiKey.Group != nil {
+		groupID = &apiKey.Group.ID
+	}
+	// 强制 antigravity 模式：仅返回当前目录中存在的模型信息。
 	if forcePlatform == service.PlatformAntigravity {
-		c.JSON(http.StatusOK, antigravity.FallbackGeminiModel(modelName))
+		if !h.antigravityGeminiModelAvailable(c.Request.Context(), groupID, requestedModel) {
+			googleError(c, http.StatusNotFound, "Model not found")
+			return
+		}
+		c.JSON(http.StatusOK, antigravity.GeminiModelFromID(modelName))
 		return
 	}
 
@@ -119,8 +141,11 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		// 没有 gemini 账户，检查是否有 antigravity 账户可用
 		hasAntigravity, _ := h.geminiCompatService.HasAntigravityAccounts(c.Request.Context(), apiKey.GroupID)
 		if hasAntigravity {
-			// antigravity 账户使用静态模型信息
-			c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
+			if !h.antigravityGeminiModelAvailable(c.Request.Context(), groupID, requestedModel) {
+				googleError(c, http.StatusNotFound, "Model not found")
+				return
+			}
+			c.JSON(http.StatusOK, antigravity.GeminiModelFromID(modelName))
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -138,6 +163,23 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		return
 	}
 	writeUpstreamResponse(c, res)
+}
+
+func (h *GatewayHandler) antigravityGeminiModelAvailable(ctx context.Context, groupID *int64, requestedModel string) bool {
+	return antigravityGeminiModelAvailable(
+		h.gatewayService.GetAvailableModels(ctx, groupID, service.PlatformAntigravity),
+		requestedModel,
+	)
+}
+
+func antigravityGeminiModelAvailable(models []string, requestedModel string) bool {
+	requestedModel = strings.TrimSpace(requestedModel)
+	for _, model := range models {
+		if strings.TrimSpace(model) == requestedModel {
+			return true
+		}
+	}
+	return false
 }
 
 // GeminiV1BetaModels proxies Gemini native REST endpoints like:
@@ -504,7 +546,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
 		sessionGroupID := derefGroupID(apiKey.GroupID)
-		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+		if account.Platform == service.PlatformAntigravity &&
+			account.Type != service.AccountTypeAPIKey &&
+			account.Type != service.AccountTypeUpstream {
 			result, err = h.antigravityGatewayService.ForwardGemini(
 				requestCtx,
 				c,

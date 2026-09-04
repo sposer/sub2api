@@ -436,8 +436,13 @@ func TestGeminiMessagesCompatService_SelectAccountForModelWithExclusions_Antigra
 
 	repo := &mockAccountRepoForGemini{
 		accounts: []Account{
-			{ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true},      // 应被隔离
-			{ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true}, // 应被选择
+			{ID: 1, Platform: PlatformGemini, Priority: 1, Status: StatusActive, Schedulable: true}, // 应被隔离
+			{
+				ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-2.5-flash"}},
+				},
+			}, // 应被选择
 		},
 		accountsByID: map[int64]*Account{},
 	}
@@ -660,11 +665,21 @@ func TestGeminiMessagesCompatService_SelectAccountForModelWithExclusions_ForcePl
 		},
 		listByPlatformFunc: func(ctx context.Context, platforms []string) ([]Account, error) {
 			return []Account{
-				{ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true},
+				{
+					ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+					Extra: map[string]any{
+						UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-2.5-flash"}},
+					},
+				},
 			}, nil
 		},
 		accountsByID: map[int64]*Account{
-			1: {ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true},
+			1: {
+				ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-2.5-flash"}},
+				},
+			},
 		},
 	}
 
@@ -722,7 +737,13 @@ func TestGeminiMessagesCompatService_SelectAccountForModelWithExclusions_StickyM
 	ctx := context.Background()
 	repo := &mockAccountRepoForGemini{
 		accounts: []Account{
-			{ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+			{
+				ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+				Extra: map[string]any{
+					"mixed_scheduling":           true,
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-2.5-flash"}},
+				},
+			},
 			{ID: 2, Platform: PlatformGemini, Priority: 2, Status: StatusActive, Schedulable: true},
 		},
 		accountsByID: map[int64]*Account{},
@@ -933,14 +954,18 @@ func TestGeminiMessagesCompatService_isModelSupportedByAccount(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "Antigravity平台-支持gemini模型",
-			account:  &Account{Platform: PlatformAntigravity},
+			name: "Antigravity平台-实时目录支持gemini模型",
+			account: &Account{Platform: PlatformAntigravity, Extra: map[string]any{
+				UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-2.5-flash"}},
+			}},
 			model:    "gemini-2.5-flash",
 			expected: true,
 		},
 		{
-			name:     "Antigravity平台-支持claude模型",
-			account:  &Account{Platform: PlatformAntigravity},
+			name: "Antigravity平台-实时目录支持claude模型",
+			account: &Account{Platform: PlatformAntigravity, Extra: map[string]any{
+				UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
+			}},
 			model:    "claude-sonnet-4-5",
 			expected: true,
 		},
@@ -951,10 +976,10 @@ func TestGeminiMessagesCompatService_isModelSupportedByAccount(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "Antigravity平台-空模型允许",
+			name:     "Antigravity平台-空模型不属于目录",
 			account:  &Account{Platform: PlatformAntigravity},
 			model:    "",
-			expected: true,
+			expected: false,
 		},
 		{
 			name: "Antigravity平台-自定义映射-支持自定义模型",

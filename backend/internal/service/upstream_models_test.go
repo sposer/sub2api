@@ -21,6 +21,20 @@ type upstreamModelMetadataRepoStub struct {
 	err       error
 }
 
+type upstreamModelsCacheInvalidatorStub struct {
+	calls []struct {
+		groupID  *int64
+		platform string
+	}
+}
+
+func (s *upstreamModelsCacheInvalidatorStub) InvalidateAvailableModelsCache(groupID *int64, platform string) {
+	s.calls = append(s.calls, struct {
+		groupID  *int64
+		platform string
+	}{groupID: groupID, platform: platform})
+}
+
 func headerValuesEqualFold(header http.Header, name string) []string {
 	for key, values := range header {
 		if strings.EqualFold(key, name) {
@@ -61,6 +75,38 @@ func grokOAuthModelSyncTestAccount(baseURL string) *Account {
 		Type:        AccountTypeOAuth,
 		Credentials: credentials,
 	}
+}
+
+func TestGetUpstreamModelCatalogSnapshotRequiresCatalogData(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{Extra: map[string]any{
+		UpstreamModelMetadataExtraKey: map[string]any{
+			"source": "upstream",
+			"models": map[string]any{
+				"metadata-only-model": map[string]any{"reasoning": true},
+			},
+		},
+	}}
+
+	require.Nil(t, account.GetUpstreamModelCatalogSnapshot())
+	require.Empty(t, account.GetUpstreamModelCatalogIDs())
+}
+
+func TestGetUpstreamModelCatalogSnapshotKeepsSuccessfulEmptyCatalog(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{Extra: map[string]any{
+		UpstreamModelCatalogExtraKey: map[string]any{
+			"source":    "upstream",
+			"synced_at": "2026-09-03T00:00:00Z",
+			"models":    []any{},
+		},
+	}}
+
+	snapshot := account.GetUpstreamModelCatalogSnapshot()
+	require.NotNil(t, snapshot)
+	require.Empty(t, snapshot.Models)
 }
 
 func TestBuildV1ModelsURL(t *testing.T) {
@@ -309,17 +355,31 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.Equal(t, "https://generativelanguage.googleapis.com/v1beta/models", geminiReq.URL.String())
 	require.Equal(t, "gemini-key", geminiReq.Header.Get("x-goog-api-key"))
 
-	antigravityReq, err := svc.buildAntigravityAPIKeyModelsRequest(ctx, &Account{
+	antigravityReq, err := svc.buildAntigravityRelayModelsRequest(ctx, &Account{
 		Platform: PlatformAntigravity,
 		Type:     AccountTypeAPIKey,
 		Credentials: map[string]any{
 			"api_key":  "antigravity-key",
-			"base_url": "https://gateway.example.com/antigravity",
+			"base_url": "https://gateway.example.com",
 		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, "https://gateway.example.com/antigravity/v1/models", antigravityReq.URL.String())
+	require.Equal(t, "Bearer antigravity-key", antigravityReq.Header.Get("Authorization"))
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
+
+	antigravityUpstreamReq, err := svc.buildAntigravityRelayModelsRequest(ctx, &Account{
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeUpstream,
+		Credentials: map[string]any{
+			"api_key":  "relay-key",
+			"base_url": "https://relay.example.com",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://relay.example.com/v1/models", antigravityUpstreamReq.URL.String())
+	require.Equal(t, "Bearer relay-key", antigravityUpstreamReq.Header.Get("Authorization"))
+	require.Equal(t, "relay-key", antigravityUpstreamReq.Header.Get("x-api-key"))
 }
 
 func TestBuildUpstreamModelsRequestSupportsGrokOAuth(t *testing.T) {
@@ -354,24 +414,23 @@ func TestBuildUpstreamModelsRequestGrokOAuthRequiresTokenProvider(t *testing.T) 
 	require.Contains(t, syncErr.SafeMessage(), "token provider")
 }
 
-func TestBuildAntigravityAPIKeyModelsRequestRejectsOfficialCloudCodeBase(t *testing.T) {
+func TestBuildAntigravityAPIKeyModelsRequestRequiresConfiguredRelayBase(t *testing.T) {
 	t.Parallel()
 
 	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
-	_, err := svc.buildAntigravityAPIKeyModelsRequest(context.Background(), &Account{
+	_, err := svc.buildAntigravityRelayModelsRequest(context.Background(), &Account{
 		Platform: PlatformAntigravity,
 		Type:     AccountTypeAPIKey,
 		Credentials: map[string]any{
-			"api_key":  "antigravity-key",
-			"base_url": "https://cloudcode-pa.googleapis.com",
+			"api_key": "antigravity-key",
 		},
 	})
 	require.Error(t, err)
 
 	var syncErr *UpstreamModelSyncError
 	require.True(t, errors.As(err, &syncErr))
-	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind)
-	require.Contains(t, syncErr.SafeMessage(), "compatible gateway")
+	require.Equal(t, UpstreamModelSyncErrorConfiguration, syncErr.Kind)
+	require.Contains(t, syncErr.SafeMessage(), "base URL")
 }
 
 func TestBuildAnthropicUpstreamModelsRequestRejectsBedrock(t *testing.T) {
@@ -417,6 +476,77 @@ func TestFetchUpstreamSupportedModelsParsesOpenAIResponse(t *testing.T) {
 	require.Equal(t, "Bearer openai-key", upstream.lastReq.Header.Get("Authorization"))
 }
 
+func TestFetchUpstreamSupportedModelsUsesAntigravityUpstreamRelay(t *testing.T) {
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"object":"list","data":[{"id":"gemini-3.8-flash-medium"}]}`)),
+	}}
+	svc := &AccountTestService{
+		httpUpstream: upstream,
+		cfg:          upstreamModelSyncTestConfig(),
+	}
+
+	models, err := svc.FetchUpstreamSupportedModels(context.Background(), &Account{
+		ID:       71,
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeUpstream,
+		Credentials: map[string]any{
+			"api_key":  "relay-key",
+			"base_url": "https://relay.example.com",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"gemini-3.8-flash-medium"}, models)
+	require.Equal(t, "https://relay.example.com/v1/models", upstream.lastReq.URL.String())
+	require.Equal(t, "Bearer relay-key", upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "relay-key", upstream.lastReq.Header.Get("x-api-key"))
+}
+
+func TestSyncUpstreamModelCatalogClearsAntigravityCatalogOnSuccessfulEmptyList(t *testing.T) {
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"object":"list","data":[]}`)),
+	}}
+	repo := &upstreamModelMetadataRepoStub{}
+	cacheInvalidator := &upstreamModelsCacheInvalidatorStub{}
+	svc := &AccountTestService{
+		accountRepo:            repo,
+		httpUpstream:           upstream,
+		cfg:                    upstreamModelSyncTestConfig(),
+		modelsCacheInvalidator: cacheInvalidator,
+	}
+	account := &Account{
+		ID:       72,
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "relay-key",
+			"base_url": "https://relay.example.com",
+		},
+	}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Source: "upstream",
+		Models: []string{"gemini-obsolete"},
+	})
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, UpstreamModelAvailabilitySourceLive, catalog.AvailabilitySource)
+	require.Empty(t, catalog.Models)
+	require.Len(t, cacheInvalidator.calls, 1)
+	require.Equal(t, PlatformAntigravity, cacheInvalidator.calls[0].platform)
+
+	encoded, err := json.Marshal(repo.updates[UpstreamModelCatalogExtraKey])
+	require.NoError(t, err)
+	var snapshot UpstreamModelCatalogSnapshot
+	require.NoError(t, json.Unmarshal(encoded, &snapshot))
+	require.Empty(t, snapshot.Models)
+	require.NotNil(t, account.GetUpstreamModelCatalogSnapshot())
+	require.Empty(t, account.GetUpstreamModelCatalogIDs())
+}
+
 // Scenario: ID-only 模型列表从 Models.dev 补齐能力。
 func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t *testing.T) {
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
@@ -449,10 +579,12 @@ func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t
 		},
 	}}
 	repo := &upstreamModelMetadataRepoStub{}
+	cacheInvalidator := &upstreamModelsCacheInvalidatorStub{}
 	svc := &AccountTestService{
-		accountRepo:  repo,
-		httpUpstream: upstream,
-		cfg:          upstreamModelSyncTestConfig(),
+		accountRepo:            repo,
+		httpUpstream:           upstream,
+		cfg:                    upstreamModelSyncTestConfig(),
+		modelsCacheInvalidator: cacheInvalidator,
 	}
 	account := &Account{
 		ID:       91,
@@ -471,6 +603,7 @@ func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t
 	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, []string{"x-preview-f-free"}, catalog.Models)
+	require.Equal(t, UpstreamModelAvailabilitySourceLive, catalog.AvailabilitySource)
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, "https://opencode.ai/zen/v1/models", upstream.requests[0].URL.String())
 	require.Equal(t, []string{"account-secret"}, headerValuesEqualFold(upstream.requests[0].Header, "X-Custom-Account-Header"))
@@ -488,6 +621,17 @@ func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t
 	require.Equal(t, int64(1_000_000), metadata.ContextWindow)
 	require.Equal(t, int64(131_072), metadata.MaxOutputTokens)
 	require.Equal(t, int64(91), repo.accountID)
+	require.Len(t, cacheInvalidator.calls, 1)
+	require.Nil(t, cacheInvalidator.calls[0].groupID)
+	require.Equal(t, PlatformOpenAI, cacheInvalidator.calls[0].platform)
+
+	rawCatalog, ok := repo.updates[UpstreamModelCatalogExtraKey]
+	require.True(t, ok)
+	encodedCatalog, err := json.Marshal(rawCatalog)
+	require.NoError(t, err)
+	var catalogSnapshot UpstreamModelCatalogSnapshot
+	require.NoError(t, json.Unmarshal(encodedCatalog, &catalogSnapshot))
+	require.Equal(t, []string{"x-preview-f-free"}, catalogSnapshot.Models)
 
 	rawSnapshot, ok := repo.updates[UpstreamModelMetadataExtraKey]
 	require.True(t, ok)
@@ -499,7 +643,7 @@ func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t
 	require.Equal(t, metadata, snapshot.Models["x-preview-f-free"])
 }
 
-// Scenario: 不提供 /models 的兼容上游使用管理员已配置模型继续同步能力。
+// Scenario: 不提供 /models 的上游仅使用管理员已配置模型同步能力元数据。
 func TestSyncUpstreamModelCatalogUsesConfiguredModelsWhenListEndpointUnsupported(t *testing.T) {
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		{
@@ -530,7 +674,13 @@ func TestSyncUpstreamModelCatalogUsesConfiguredModelsWhenListEndpointUnsupported
 		},
 	}}
 	repo := &upstreamModelMetadataRepoStub{}
-	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: upstreamModelSyncTestConfig()}
+	cacheInvalidator := &upstreamModelsCacheInvalidatorStub{}
+	svc := &AccountTestService{
+		accountRepo:            repo,
+		httpUpstream:           upstream,
+		cfg:                    upstreamModelSyncTestConfig(),
+		modelsCacheInvalidator: cacheInvalidator,
+	}
 	account := &Account{
 		ID: 97, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
 		Credentials: map[string]any{
@@ -548,6 +698,7 @@ func TestSyncUpstreamModelCatalogUsesConfiguredModelsWhenListEndpointUnsupported
 	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
 	require.NoError(t, err)
 	require.Equal(t, []string{"glm-5.3"}, catalog.Models)
+	require.Equal(t, UpstreamModelAvailabilitySourceConfigured, catalog.AvailabilitySource)
 	require.Empty(t, catalog.Warnings)
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, "https://provider.example/v1/models", upstream.requests[0].URL.String())
@@ -556,7 +707,10 @@ func TestSyncUpstreamModelCatalogUsesConfiguredModelsWhenListEndpointUnsupported
 	require.Equal(t, []string{"low", "medium", "high"}, metadata.SupportedReasoningLevels)
 	require.Equal(t, []string{"text"}, metadata.InputModalities)
 	require.Equal(t, int64(1_000_000), metadata.ContextWindow)
-	require.NotNil(t, repo.updates)
+	require.Contains(t, repo.updates, UpstreamModelMetadataExtraKey)
+	require.NotContains(t, repo.updates, UpstreamModelCatalogExtraKey,
+		"configured fallback must remain an explicit restriction, not implicit availability")
+	require.Empty(t, cacheInvalidator.calls)
 }
 
 func TestSyncUpstreamModelCatalogDoesNotUseConfiguredModelsForRealUpstreamFailures(t *testing.T) {
@@ -765,7 +919,9 @@ func TestSyncUpstreamModelCatalogDoesNotOverwriteSnapshotWhenRegistryFails(t *te
 		Code:    UpstreamModelMetadataIncompleteCode,
 		Message: "Model IDs were synced, but capability metadata is incomplete.",
 	}}, catalog.Warnings)
-	require.Nil(t, repo.updates, "a failed metadata enrichment must not erase a previously saved snapshot")
+	require.Contains(t, repo.updates, UpstreamModelCatalogExtraKey)
+	require.NotContains(t, repo.updates, UpstreamModelMetadataExtraKey,
+		"a failed metadata enrichment must not erase a previously saved metadata snapshot")
 }
 
 func TestSyncUpstreamModelCatalogDoesNotPersistPartialMetadataWhenRegistryFails(t *testing.T) {
@@ -792,7 +948,9 @@ func TestSyncUpstreamModelCatalogDoesNotPersistPartialMetadataWhenRegistryFails(
 	require.Equal(t, []string{"partially-described-model"}, catalog.Models)
 	require.Equal(t, "Partial Model", catalog.Metadata["partially-described-model"].DisplayName)
 	require.Equal(t, UpstreamModelMetadataIncompleteCode, catalog.Warnings[0].Code)
-	require.Nil(t, repo.updates, "partial metadata must not replace a more complete persisted snapshot")
+	require.Contains(t, repo.updates, UpstreamModelCatalogExtraKey)
+	require.NotContains(t, repo.updates, UpstreamModelMetadataExtraKey,
+		"partial metadata must not replace a more complete persisted metadata snapshot")
 }
 
 func TestFetchUpstreamSupportedModelsUsesConfiguredBodyLimit(t *testing.T) {

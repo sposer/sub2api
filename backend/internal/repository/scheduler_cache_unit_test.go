@@ -298,6 +298,45 @@ func TestMarshalSchedulerCacheAccountKeepsEncodingJSONWireFormat(t *testing.T) {
 	}
 }
 
+func TestSchedulerCacheSnapshotKeepsAntigravityLiveCatalogWithoutMapping(t *testing.T) {
+	ctx := context.Background()
+	cache := newSchedulerCacheUnit(t)
+	bucket := service.SchedulerBucket{
+		GroupID:  38,
+		Platform: service.PlatformAntigravity,
+		Mode:     service.SchedulerModeSingle,
+	}
+	account := service.Account{
+		ID:          3801,
+		Platform:    service.PlatformAntigravity,
+		Type:        service.AccountTypeOAuth,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Extra: map[string]any{
+			service.UpstreamModelCatalogExtraKey: service.UpstreamModelCatalogSnapshot{
+				Source:   "upstream",
+				SyncedAt: "2026-09-04T01:45:24Z",
+				Models:   []string{"gemini-3.8-flash-high"},
+			},
+			"unused_large_field": "drop-me",
+		},
+	}
+
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{account}))
+
+	snapshot, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, snapshot, 1)
+	require.Empty(t, snapshot[0].GetModelMapping())
+	require.NotContains(t, snapshot[0].Extra, "unused_large_field")
+	mapped, supported := snapshot[0].ResolveAntigravityModel("gemini-3.8-flash-high")
+	require.True(t, supported)
+	require.Equal(t, "gemini-3.8-flash-high", mapped)
+}
+
 func TestBuildSchedulerMetadataAccount_KeepsOpenAIWSFlags(t *testing.T) {
 	account := service.Account{
 		ID:       42,

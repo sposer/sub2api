@@ -271,11 +271,23 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	}
 
 	// 应用模型映射：
-	// - APIKey 账号：使用账号级别的显式映射（如果配置），否则透传原始模型名
+	// - Antigravity APIKey 账号：使用显式映射或实时 catalog
+	// - 其他 APIKey 账号：使用账号级别的显式映射（如果配置），否则透传原始模型名
 	// - OAuth/SetupToken 账号：使用 Anthropic 标准映射（短ID → 长ID）
+	// decision: custom Antigravity relays use ResolveAntigravityModel; not generic API-key
+	// passthrough because catalog-derived aliases must reach their resolved upstream model.
 	mappedModel := reqModel
 	mappingSource := ""
-	if account.Type == AccountTypeAPIKey {
+	if account.Platform == PlatformAntigravity && account.Type == AccountTypeAPIKey {
+		var supported bool
+		mappedModel, supported = account.ResolveAntigravityModel(reqModel)
+		if !supported {
+			return nil, fmt.Errorf("model %s is not available for account %d", reqModel, account.ID)
+		}
+		if mappedModel != reqModel {
+			mappingSource = "account"
+		}
+	} else if account.Type == AccountTypeAPIKey {
 		mappedModel = account.GetMappedModel(reqModel)
 		if mappedModel != reqModel {
 			mappingSource = "account"

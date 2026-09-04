@@ -15,7 +15,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -1071,8 +1070,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 // Models handles listing available models
 // GET /v1/models
-// Returns models based on account configurations (model_mapping whitelist)
-// Falls back to default models if no whitelist is configured
+// Returns models based on account configurations (model_mapping whitelist).
+// Antigravity uses the synced live catalog; providers with stable local contracts may fall back to defaults.
 func (h *GatewayHandler) Models(c *gin.Context) {
 	apiKey, _ := middleware2.GetAPIKeyFromContext(c)
 
@@ -1088,9 +1087,13 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 
 	if platform == service.PlatformComposite {
-		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID)
+		availableModels, hasSchedulablePlatforms := h.compositeAvailableModels(c.Request.Context(), groupID)
+		fallbackModels := defaultModelIDsForPlatform(service.PlatformComposite)
+		if hasSchedulablePlatforms {
+			fallbackModels = nil
+		}
 		if apiKey != nil && apiKey.Group != nil && apiKey.Group.CustomModelsListEnabled() {
-			availableModels = filterModelsByCustomList(availableModels, defaultModelIDsForPlatform(service.PlatformComposite), apiKey.Group.ModelsListConfig.Models)
+			availableModels = filterModelsByCustomList(availableModels, fallbackModels, apiKey.Group.ModelsListConfig.Models)
 			writeCustomModelsList(c, service.PlatformComposite, availableModels)
 			return
 		}
@@ -1098,7 +1101,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 			writeModelsList(c, service.PlatformComposite, availableModels)
 			return
 		}
-		writeModelsList(c, service.PlatformComposite, defaultModelIDsForPlatform(service.PlatformComposite))
+		writeModelsList(c, service.PlatformComposite, fallbackModels)
 		return
 	}
 
@@ -1134,6 +1137,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 	if platform == service.PlatformGrok {
 		writeGrokModelsList(c, xai.DefaultModelIDs())
+		return
+	}
+	if platform == service.PlatformAntigravity {
+		writeModelsList(c, service.PlatformAntigravity, nil)
 		return
 	}
 
@@ -1190,8 +1197,11 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 		platform = group.Platform
 	}
 	if platform == service.PlatformComposite {
-		availableModels := h.compositeAvailableModels(ctx, groupID)
+		availableModels, hasSchedulablePlatforms := h.compositeAvailableModels(ctx, groupID)
 		fallbackModels := defaultCodexModelIDsForPlatform(service.PlatformComposite)
+		if hasSchedulablePlatforms {
+			fallbackModels = nil
+		}
 		if group.CustomModelsListEnabled() {
 			return filterModelsByCustomList(availableModels, fallbackModels, group.ModelsListConfig.Models)
 		}
@@ -1216,9 +1226,9 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 	return fallbackModels
 }
 
-func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *int64) []string {
+func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *int64) ([]string, bool) {
 	if h == nil || h.gatewayService == nil {
-		return nil
+		return nil, false
 	}
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
@@ -1244,7 +1254,7 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 			models = append(models, model)
 		}
 	}
-	return models
+	return models, len(schedulablePlatforms) > 0
 }
 
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
@@ -1451,12 +1461,7 @@ func defaultModelIDsForPlatform(platform string) []string {
 		}
 		return ids
 	case service.PlatformAntigravity:
-		models := antigravity.DefaultModels()
-		ids := make([]string, 0, len(models))
-		for _, model := range models {
-			ids = append(ids, model.ID)
-		}
-		return ids
+		return nil
 	case service.PlatformAnthropic:
 		return claude.DefaultModelIDs()
 	case service.PlatformGrok:
@@ -1502,13 +1507,18 @@ func mergeModelIDs(primary, secondary []string) []string {
 	return merged
 }
 
-// AntigravityModels 返回 Antigravity 支持的全部模型
+// AntigravityModels 返回当前分组账号的 Antigravity 模型目录。
 // GET /antigravity/models
 func (h *GatewayHandler) AntigravityModels(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   antigravity.DefaultModels(),
-	})
+	var groupID *int64
+	if apiKey, ok := middleware2.GetAPIKeyFromContext(c); ok && apiKey != nil {
+		groupID = apiKey.GroupID
+		if apiKey.Group != nil {
+			groupID = &apiKey.Group.ID
+		}
+	}
+	modelIDs := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, service.PlatformAntigravity)
+	writeModelsList(c, service.PlatformAntigravity, modelIDs)
 }
 
 func cloneAPIKeyWithGroup(apiKey *service.APIKey, group *service.Group) *service.APIKey {

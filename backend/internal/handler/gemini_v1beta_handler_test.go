@@ -50,9 +50,9 @@ func TestGeminiV1BetaHandler_PlatformRoutingInvariant(t *testing.T) {
 	}
 }
 
-// TestGeminiV1BetaHandler_ListModelsAntigravityFallback 验证 ListModels 的 antigravity 降级逻辑
-// 当没有 gemini 账户但有 antigravity 账户时，应返回静态模型列表
-func TestGeminiV1BetaHandler_ListModelsAntigravityFallback(t *testing.T) {
+// TestGeminiV1BetaHandler_ListModelsAntigravityCatalog 验证 ListModels 的 antigravity 降级逻辑。
+// 当没有 Gemini 账户但有 Antigravity 账户时，应返回账号实时 catalog。
+func TestGeminiV1BetaHandler_ListModelsAntigravityCatalog(t *testing.T) {
 	tests := []struct {
 		name             string
 		hasGeminiAccount bool
@@ -66,10 +66,10 @@ func TestGeminiV1BetaHandler_ListModelsAntigravityFallback(t *testing.T) {
 			expectedBehavior: "forward_to_upstream",
 		},
 		{
-			name:             "无Gemini有Antigravity-返回静态列表",
+			name:             "无Gemini有Antigravity-返回实时目录",
 			hasGeminiAccount: false,
 			hasAntigravity:   true,
-			expectedBehavior: "static_fallback",
+			expectedBehavior: "live_catalog",
 		},
 		{
 			name:             "无任何账户-返回503",
@@ -87,7 +87,7 @@ func TestGeminiV1BetaHandler_ListModelsAntigravityFallback(t *testing.T) {
 			if tt.hasGeminiAccount {
 				behavior = "forward_to_upstream"
 			} else if tt.hasAntigravity {
-				behavior = "static_fallback"
+				behavior = "live_catalog"
 			} else {
 				behavior = "service_unavailable"
 			}
@@ -97,50 +97,13 @@ func TestGeminiV1BetaHandler_ListModelsAntigravityFallback(t *testing.T) {
 	}
 }
 
-// TestGeminiV1BetaHandler_GetModelAntigravityFallback 验证 GetModel 的 antigravity 降级逻辑
-func TestGeminiV1BetaHandler_GetModelAntigravityFallback(t *testing.T) {
-	tests := []struct {
-		name             string
-		hasGeminiAccount bool
-		hasAntigravity   bool
-		expectedBehavior string
-	}{
-		{
-			name:             "有Gemini账户-调用ForwardAIStudioGET",
-			hasGeminiAccount: true,
-			hasAntigravity:   false,
-			expectedBehavior: "forward_to_upstream",
-		},
-		{
-			name:             "无Gemini有Antigravity-返回静态模型信息",
-			hasGeminiAccount: false,
-			hasAntigravity:   true,
-			expectedBehavior: "static_model_info",
-		},
-		{
-			name:             "无任何账户-返回503",
-			hasGeminiAccount: false,
-			hasAntigravity:   false,
-			expectedBehavior: "service_unavailable",
-		},
-	}
+func TestAntigravityGeminiModelAvailableRequiresCurrentCatalogEntry(t *testing.T) {
+	t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// 模拟 GeminiV1BetaGetModel 的逻辑 (lines 77-87 in gemini_v1beta_handler.go)
-			var behavior string
-
-			if tt.hasGeminiAccount {
-				behavior = "forward_to_upstream"
-			} else if tt.hasAntigravity {
-				behavior = "static_model_info"
-			} else {
-				behavior = "service_unavailable"
-			}
-
-			require.Equal(t, tt.expectedBehavior, behavior)
-		})
-	}
+	models := []string{"gemini-3.8-flash", "gemini-3.8-flash-medium"}
+	require.True(t, antigravityGeminiModelAvailable(models, "gemini-3.8-flash"))
+	require.False(t, antigravityGeminiModelAvailable(models, "gemini-nonexistent"))
+	require.False(t, antigravityGeminiModelAvailable(nil, "gemini-3.8-flash"))
 }
 
 func TestShouldFallbackGeminiModel_KnownFallbackOn404(t *testing.T) {

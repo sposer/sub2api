@@ -121,6 +121,7 @@ describe('ModelWhitelistSelector', () => {
   it('warns when model IDs sync but capability metadata is incomplete', async () => {
     syncUpstreamModels.mockResolvedValue({
       models: ['x-preview-f-free'],
+      availability_source: 'live',
       warnings: [
         {
           code: 'upstream_model_metadata_incomplete',
@@ -153,9 +154,38 @@ describe('ModelWhitelistSelector', () => {
     expect(showSuccess).not.toHaveBeenCalled()
   })
 
+  it('does not promote configured fallback models into the whitelist', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: ['configured-only'],
+      availability_source: 'configured'
+    })
+    const wrapper = mount(ModelWhitelistSelector, {
+      props: {
+        modelValue: [],
+        platform: 'openai',
+        accountId: 47
+      },
+      global: {
+        stubs: {
+          ModelIcon: true
+        }
+      }
+    })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsLiveUnavailable')
+  })
+
   it('reports a successful preview so account creation can persist metadata', async () => {
     syncUpstreamModelsPreview.mockResolvedValue({
       models: ['x-preview-f-free'],
+      availability_source: 'live',
       metadata: {
         'x-preview-f-free': {
           id: 'x-preview-f-free',

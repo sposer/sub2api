@@ -54,9 +54,6 @@ func DefaultTransformOptions() TransformOptions {
 	}
 }
 
-// webSearchFallbackModel web_search 请求使用的降级模型
-const webSearchFallbackModel = "gemini-2.5-flash"
-
 // MaxTokensBudgetPadding max_tokens 自动调整时在 budget_tokens 基础上增加的额度
 // Claude API 要求 max_tokens > thinking.budget_tokens，否则返回 400 错误
 const MaxTokensBudgetPadding = 1000
@@ -88,15 +85,13 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	// 用于存储 tool_use id -> name 映射
 	toolIDToName := make(map[string]string)
 
-	// 检测是否有 web_search 工具
-	hasWebSearchTool := hasWebSearchTool(claudeReq.Tools)
+	// 检测是否有 web_search 工具。模型必须由调用方基于账号可用性解析，
+	// 转换层只负责协议语义，不能改写到目录外的固定型号。
+	includesWebSearch := HasWebSearchTool(claudeReq.Tools)
 	requestType := "agent"
 	targetModel := mappedModel
-	if hasWebSearchTool {
+	if includesWebSearch {
 		requestType = "web_search"
-		if targetModel != webSearchFallbackModel {
-			targetModel = webSearchFallbackModel
-		}
 	}
 
 	// 检测是否启用 thinking
@@ -688,7 +683,9 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 	return config
 }
 
-func hasWebSearchTool(tools []ClaudeTool) bool {
+// HasWebSearchTool reports whether a Claude tool list requests Antigravity's
+// server-side web search capability.
+func HasWebSearchTool(tools []ClaudeTool) bool {
 	for _, tool := range tools {
 		if isWebSearchTool(tool) {
 			return true
@@ -726,7 +723,7 @@ func buildTools(tools []ClaudeTool) []GeminiToolDeclaration {
 		return nil
 	}
 
-	hasWebSearch := hasWebSearchTool(tools)
+	hasWebSearch := HasWebSearchTool(tools)
 	hasCodeExecution := false
 	for _, tool := range tools {
 		if isCodeExecutionTool(tool) {

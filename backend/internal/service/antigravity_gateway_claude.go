@@ -57,6 +57,13 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// 应用 thinking 模式自动后缀：如果 thinking 开启且目标是 claude-sonnet-4-5，自动改为 thinking 版本
 	thinkingEnabled := claudeReq.Thinking != nil && (claudeReq.Thinking.Type == "enabled" || claudeReq.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
+	if antigravity.HasWebSearchTool(claudeReq.Tools) {
+		webSearchModel, supported := account.ResolveAntigravityWebSearchModel(mappedModel)
+		if !supported {
+			return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "web_search requires an available Gemini model")
+		}
+		mappedModel = webSearchModel
+	}
 	billingModel := mappedModel
 
 	// 获取 access_token

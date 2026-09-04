@@ -637,7 +637,21 @@ describe('UseKeyModal', () => {
     expect(models['gpt-5.6'].name).toBe('GPT-5.6 (Sol)')
   })
 
-  it('renders Claude Fable 5 OpenCode config with adaptive thinking', async () => {
+  it('builds Antigravity OpenCode models from the authenticated live catalog', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        object: 'list',
+        data: [
+          { id: 'claude-future' },
+          { id: 'gpt-oss-future' },
+          { id: 'gemini-9.9-flash-medium' }
+        ]
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
     const wrapper = mount(UseKeyModal, {
       props: {
         show: true,
@@ -657,6 +671,7 @@ describe('UseKeyModal', () => {
       }
     })
 
+    await flushPromises()
     const opencodeTab = wrapper.findAll('button').find((button) =>
       button.text().includes('keys.useKeyModal.cliTabs.opencode')
     )
@@ -665,23 +680,65 @@ describe('UseKeyModal', () => {
     await opencodeTab!.trigger('click')
     await nextTick()
 
-    const claudeConfig = wrapper.findAll('pre code')
-      .map((code) => code.text())
-      .find((content) => content.includes('"antigravity-claude"'))
+    const configs = wrapper.findAll('pre code').map((code) => JSON.parse(code.text()))
+    const claude = configs.find((config) => config.provider['antigravity-claude'])
+    const gemini = configs.find((config) => config.provider['antigravity-gemini'])
+    const claudeModels = claude.provider['antigravity-claude'].models
+    const geminiModels = gemini.provider['antigravity-gemini'].models
 
-    expect(claudeConfig).toBeDefined()
-    const parsed = JSON.parse(claudeConfig!)
-    const fable51 = parsed.provider['antigravity-claude'].models['claude-fable-5-1']
-    const fable = parsed.provider['antigravity-claude'].models['claude-fable-5']
+    expect(Object.keys(claudeModels)).toEqual(['claude-future', 'gpt-oss-future'])
+    expect(claudeModels['claude-future']).toEqual({ name: 'claude-future' })
+    expect(claudeModels['gpt-oss-future']).toEqual({ name: 'gpt-oss-future' })
+    expect(geminiModels).toEqual({
+      'gemini-9.9-flash-medium': { name: 'gemini-9.9-flash-medium' }
+    })
+    expect(geminiModels).not.toHaveProperty('gemini-3.7-flash')
+    expect(fetchMock).toHaveBeenCalledWith('https://example.com/v1/models', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer sk-test' })
+    }))
+  })
 
-    expect(fable51.name).toBe('Claude Fable 5.1')
-    expect(fable51.limit).toEqual({ context: 1048576, output: 128000 })
-    expect(fable51.options.thinking).toEqual({ type: 'adaptive' })
-    expect(fable51.options.thinking).not.toHaveProperty('budgetTokens')
-    expect(fable.name).toBe('Claude Fable 5')
-    expect(fable.limit).toEqual({ context: 1048576, output: 128000 })
-    expect(fable.options.thinking).toEqual({ type: 'adaptive' })
-    expect(fable.options.thinking).not.toHaveProperty('budgetTokens')
+  it('uses a live Antigravity Gemini model in Gemini CLI setup', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        object: 'list',
+        data: [
+          { id: 'claude-future' },
+          { id: 'gemini-9.9-flash-medium' }
+        ]
+      })
+    }))
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'antigravity'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    await flushPromises()
+    const geminiTab = wrapper.findAll('button').find((button) =>
+      button.text().includes('keys.useKeyModal.cliTabs.geminiCli')
+    )
+    await geminiTab!.trigger('click')
+    await nextTick()
+
+    const allCode = wrapper.findAll('pre code').map((code) => code.text()).join('\n')
+    expect(allCode).toContain('GEMINI_MODEL="gemini-9.9-flash-medium"')
+    expect(allCode).not.toContain('gemini-2.0-flash')
   })
 
   // Scenario: API Key users can fetch a routed group catalog and reference it from config.toml.

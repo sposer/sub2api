@@ -756,6 +756,9 @@ export default {
       syncUpstreamModelsSuccess: 'Synced {count} new model(s) from upstream ({total} upstream total)',
       syncUpstreamModelsNoChanges: 'All {count} upstream model(s) are already in the whitelist',
       syncUpstreamModelsEmpty: 'Upstream returned no models to sync',
+      syncUpstreamCatalogSuccess: 'Synced the current upstream model catalog with {count} model(s)',
+      syncUpstreamCatalogEmpty: 'Cleared the upstream model catalog; upstream currently returned no models',
+      syncUpstreamModelsLiveUnavailable: 'The live upstream model list is unavailable; configured models were not saved as a dynamic catalog',
       syncUpstreamModelsFailed: 'Failed to sync upstream models',
       syncUpstreamModelsError: 'Failed to sync upstream models: {message}',
       syncUpstreamModelsMetadataIncomplete:

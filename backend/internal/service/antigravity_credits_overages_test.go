@@ -238,6 +238,9 @@ func TestAntigravityRetryLoop_ModelRateLimited_InjectsCredits(t *testing.T) {
 		Schedulable: true,
 		Extra: map[string]any{
 			"allow_overages": true,
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limited_at":     time.Now().UTC().Format(time.RFC3339),
@@ -289,6 +292,9 @@ func TestAntigravityRetryLoop_CreditsExhausted_DoesNotInject(t *testing.T) {
 		Schedulable: true,
 		Extra: map[string]any{
 			"allow_overages": true,
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limited_at":     time.Now().UTC().Format(time.RFC3339),
@@ -354,6 +360,9 @@ func TestAntigravityRetryLoop_CreditErrorMarksExhausted(t *testing.T) {
 		Schedulable: true,
 		Extra: map[string]any{
 			"allow_overages": true,
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limited_at":     time.Now().UTC().Format(time.RFC3339),

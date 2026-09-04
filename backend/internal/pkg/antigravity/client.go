@@ -52,12 +52,6 @@ func NewAPIRequestWithURL(ctx context.Context, baseURL, action, accessToken stri
 	return req, nil
 }
 
-// NewAPIRequest 使用默认 URL 创建 Antigravity API 请求（v1internal 端点）
-// 向后兼容：仅使用默认 BaseURL
-func NewAPIRequest(ctx context.Context, action, accessToken string, body []byte) (*http.Request, error) {
-	return NewAPIRequestWithURL(ctx, BaseURL, action, accessToken, body)
-}
-
 // TokenResponse Google OAuth token 响应
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -652,14 +646,24 @@ type FetchAvailableModelsResponse struct {
 	DeprecatedModelIDs map[string]DeprecatedModelInfo `json:"deprecatedModelIds,omitempty"`
 }
 
-// FetchAvailableModels 获取可用模型和配额信息，返回解析后的结构体和原始 JSON
-// 支持 URL fallback：sandbox → daily → prod
-func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectID string, bodyLimit int64) (*FetchAvailableModelsResponse, map[string]any, error) {
+// FetchAvailableModels 获取可用模型和配额信息，返回解析后的结构体和原始 JSON。
+func (c *Client) FetchAvailableModels(ctx context.Context, baseURLs []string, accessToken, projectID string, bodyLimit int64) (*FetchAvailableModelsResponse, map[string]any, error) {
 	if c == nil || c.httpClient == nil {
 		return nil, nil, errors.New("antigravity client is not configured")
 	}
 	if bodyLimit <= 0 {
 		return nil, nil, errors.New("fetchAvailableModels body limit must be positive")
+	}
+
+	availableURLs := make([]string, 0, len(baseURLs))
+	for _, baseURL := range baseURLs {
+		baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if baseURL != "" {
+			availableURLs = append(availableURLs, baseURL)
+		}
+	}
+	if len(availableURLs) == 0 {
+		return nil, nil, errors.New("fetchAvailableModels base URL is required")
 	}
 
 	reqBody := FetchAvailableModelsRequest{Project: projectID}
@@ -668,8 +672,8 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 		return nil, nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	// decision: 调用方提供与真实转发一致的端点顺序；不在客户端固定 prod 优先，
+	// 因为另一个端点即使返回 200，也可能公布当前转发端点不可用的模型集。
 
 	fetchClient := c.fetchAvailableModelsHTTPClient()
 	var lastErr error

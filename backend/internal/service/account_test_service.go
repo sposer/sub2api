@@ -43,9 +43,8 @@ import (
 var sseDataPrefix = regexp.MustCompile(`^data:\s*`)
 
 const (
-	testClaudeAPIURL            = "https://api.anthropic.com/v1/messages?beta=true"
-	chatgptCodexAPIURL          = "https://chatgpt.com/backend-api/codex/responses"
-	defaultAntigravityTestModel = "claude-sonnet-4-6"
+	testClaudeAPIURL   = "https://api.anthropic.com/v1/messages?beta=true"
+	chatgptCodexAPIURL = "https://chatgpt.com/backend-api/codex/responses"
 )
 
 // TestEvent represents a SSE event for account testing
@@ -136,6 +135,10 @@ func normalizeGrokAccountTestMode(mode string) string {
 	}
 }
 
+type availableModelsCacheInvalidator interface {
+	InvalidateAvailableModelsCache(groupID *int64, platform string)
+}
+
 // AccountTestService handles account testing operations
 type AccountTestService struct {
 	accountRepo               AccountRepository
@@ -150,6 +153,7 @@ type AccountTestService struct {
 	modelMetadataRegistryMu   sync.Mutex
 	modelMetadataRegistry     map[string]modelsDevProvider
 	modelMetadataRegistryAt   time.Time
+	modelsCacheInvalidator    availableModelsCacheInvalidator
 	pluginManager             *PluginManager
 	agentIdentityTaskMu       sync.Mutex
 	agentIdentityWS           agentIdentityWSConnectionInvalidator
@@ -167,6 +171,12 @@ func (s *AccountTestService) SetSettingService(settingService *SettingService) {
 func (s *AccountTestService) SetPluginManager(pluginManager *PluginManager) {
 	if s != nil {
 		s.pluginManager = pluginManager
+	}
+}
+
+func (s *AccountTestService) SetAvailableModelsCacheInvalidator(invalidator availableModelsCacheInvalidator) {
+	if s != nil {
+		s.modelsCacheInvalidator = invalidator
 	}
 }
 
@@ -359,8 +369,9 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		testModelID = claude.DefaultTestModel
 	}
 
-	// API Key 账号测试连接时也需要应用通配符模型映射。
-	if account.Type == "apikey" {
+	// decision: Antigravity resolves once in routeAntigravityTest; not remap the
+	// resolved target here because chained mappings would change the tested model.
+	if account.Platform != PlatformAntigravity && (account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream) {
 		testModelID = account.GetMappedModel(testModelID)
 	}
 
@@ -382,13 +393,19 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
-	} else if account.Type == "apikey" {
+	} else if account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
 		authToken = account.GetCredential("api_key")
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No API key available")
 		}
 
 		baseURL := account.GetBaseURL()
+		if account.Type == AccountTypeUpstream {
+			baseURL = strings.TrimSpace(account.GetCredential("base_url"))
+			if baseURL == "" {
+				return s.sendErrorAndEnd(c, "No base URL available")
+			}
+		}
 		if baseURL == "" {
 			baseURL = "https://api.anthropic.com"
 		}
@@ -438,7 +455,12 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	} else {
 		req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
-		setAnthropicAPIKeyAuthHeader(req.Header, account, authToken)
+		if account.Platform == PlatformAntigravity && account.Type == AccountTypeUpstream {
+			req.Header.Set("Authorization", "Bearer "+authToken)
+			req.Header.Set("x-api-key", authToken)
+		} else {
+			setAnthropicAPIKeyAuthHeader(req.Header, account, authToken)
+		}
 	}
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
@@ -2235,8 +2257,9 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 		testModelID = geminicli.DefaultTestModel
 	}
 
-	// For static upstream credentials with model mapping, map the model
-	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
+	// decision: Antigravity resolves once in routeAntigravityTest; not remap the
+	// resolved target here because chained mappings would change the tested model.
+	if account.Platform != PlatformAntigravity && (account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount) {
 		mapping := account.GetModelMapping()
 		if len(mapping) > 0 {
 			if mappedModel, exists := mapping[testModelID]; exists {
@@ -2260,8 +2283,8 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	var err error
 
 	switch account.Type {
-	case AccountTypeAPIKey:
-		req, err = s.buildGeminiAPIKeyRequest(ctx, account, testModelID, payload)
+	case AccountTypeAPIKey, AccountTypeUpstream:
+		req, err = s.buildGeminiStaticCredentialRequest(ctx, account, testModelID, payload)
 	case AccountTypeOAuth:
 		req, err = s.buildGeminiOAuthRequest(ctx, account, testModelID, payload)
 	case AccountTypeServiceAccount:
@@ -2299,15 +2322,19 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 }
 
 // routeAntigravityTest 路由 Antigravity 账号的测试请求。
-// APIKey 类型走原生协议（与 gateway_handler 路由一致），OAuth/Upstream 走 CRS 中转。
+// APIKey/Upstream 走其兼容上游，OAuth 走 CRS 中转。
 func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Account, modelID string, prompt string) error {
-	if account.Type == AccountTypeAPIKey {
-		if strings.HasPrefix(modelID, "gemini-") {
-			return s.testGeminiAccountConnection(c, account, modelID, prompt)
-		}
-		return s.testClaudeAccountConnection(c, account, modelID)
+	requestedModel, mappedModel, err := antigravityConnectionTestModel(account, modelID)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
 	}
-	return s.testAntigravityAccountConnection(c, account, modelID)
+	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
+		if strings.HasPrefix(mappedModel, "gemini-") {
+			return s.testGeminiAccountConnection(c, account, mappedModel, prompt)
+		}
+		return s.testClaudeAccountConnection(c, account, mappedModel)
+	}
+	return s.testAntigravityAccountConnection(c, account, requestedModel)
 }
 
 // testAntigravityAccountConnection tests an Antigravity account's connection
@@ -2315,7 +2342,7 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, account *Account, modelID string) error {
 	ctx := c.Request.Context()
 
-	testModelID := antigravityConnectionTestModel(modelID)
+	testModelID := modelID
 
 	if s.antigravityGatewayService == nil {
 		return s.sendErrorAndEnd(c, "Antigravity gateway service not configured")
@@ -2346,15 +2373,31 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 	return nil
 }
 
-func antigravityConnectionTestModel(modelID string) string {
-	if modelID == "" {
-		return defaultAntigravityTestModel
+// decision: connection tests select from account availability; not a built-in model ID
+// because testing and gateway routing must use the same dynamic catalog.
+func antigravityConnectionTestModel(account *Account, modelID string) (requestedModel, mappedModel string, err error) {
+	if account == nil {
+		return "", "", errors.New("antigravity account is required")
 	}
-	return modelID
+	requestedModel = strings.TrimPrefix(strings.TrimSpace(modelID), "models/")
+	if requestedModel == "" {
+		models := account.GetAntigravityAvailableModelIDs()
+		if len(models) > 0 {
+			requestedModel = models[0]
+		}
+	}
+	if requestedModel == "" {
+		return "", "", errors.New("no synced Antigravity models available")
+	}
+	mappedModel, supported := account.ResolveAntigravityModel(requestedModel)
+	if !supported {
+		return "", "", fmt.Errorf("model %s is not available for this account", requestedModel)
+	}
+	return requestedModel, mappedModel, nil
 }
 
-// buildGeminiAPIKeyRequest builds request for Gemini API Key accounts
-func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
+// buildGeminiStaticCredentialRequest builds a Gemini-compatible request for static credentials.
+func (s *AccountTestService) buildGeminiStaticCredentialRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
 	apiKey := account.GetCredential("api_key")
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("no API key available")

@@ -108,9 +108,12 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini-3-pro-preview mapped to gemini-3-pro-high",
+			name: "antigravity platform - explicit gemini mapping uses upstream rate-limit key",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"gemini-3-pro-preview": "gemini-3-pro-high",
+				}},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						"gemini-3-pro-high": map[string]any{
@@ -123,9 +126,12 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit blocks mapped preview",
+			name: "antigravity platform - gemini family rate limit blocks explicitly mapped preview",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"gemini-3-pro-preview": "gemini-3-pro-high",
+				}},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						antigravityGeminiModelRateLimitKey: map[string]any{
@@ -138,10 +144,11 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       true,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit does not block claude",
+			name: "antigravity platform - gemini family rate limit does not block catalog claude",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
 					modelRateLimitsKey: map[string]any{
 						antigravityGeminiModelRateLimitKey: map[string]any{
 							"rate_limit_reset_at": future,
@@ -168,9 +175,12 @@ func TestIsModelRateLimited(t *testing.T) {
 			expected:       false, // gemini 平台不走 antigravity 映射
 		},
 		{
-			name: "antigravity platform - claude-opus-4-5-thinking mapped to opus-4-6-thinking",
+			name: "antigravity platform - explicit claude mapping uses upstream rate-limit key",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"claude-opus-4-5-thinking": "claude-opus-4-6-thinking",
+				}},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						"claude-opus-4-6-thinking": map[string]any{
@@ -262,6 +272,9 @@ func TestIsModelRateLimited_Antigravity_ThinkingAffectsModelKey(t *testing.T) {
 	account := &Account{
 		Platform: PlatformAntigravity,
 		Extra: map[string]any{
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5-thinking": map[string]any{
 					"rate_limit_reset_at": future,
@@ -369,9 +382,12 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    0,
 		},
 		{
-			name: "antigravity platform - claude-opus-4-5-thinking mapped to opus-4-6-thinking",
+			name: "antigravity platform - explicit claude mapping uses upstream rate-limit key",
 			account: &Account{
 				Platform: PlatformAntigravity,
+				Credentials: map[string]any{"model_mapping": map[string]any{
+					"claude-opus-4-5-thinking": "claude-opus-4-6-thinking",
+				}},
 				Extra: map[string]any{
 					modelRateLimitsKey: map[string]any{
 						"claude-opus-4-6-thinking": map[string]any{
@@ -385,10 +401,11 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    6 * time.Minute,
 		},
 		{
-			name: "antigravity platform - gemini family rate limit remaining",
+			name: "antigravity platform - catalog gemini family rate limit remaining",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-3-pro-preview"}},
 					modelRateLimitsKey: map[string]any{
 						antigravityGeminiModelRateLimitKey: map[string]any{
 							"rate_limit_reset_at": future10m,
@@ -401,10 +418,11 @@ func TestGetModelRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    11 * time.Minute,
 		},
 		{
-			name: "antigravity platform - gemini family remaining ignored for claude",
+			name: "antigravity platform - gemini family remaining ignored for catalog claude",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
 					modelRateLimitsKey: map[string]any{
 						antigravityGeminiModelRateLimitKey: map[string]any{
 							"rate_limit_reset_at": future10m,
@@ -448,10 +466,11 @@ func TestGetRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    0,
 		},
 		{
-			name: "model rate limited - 15 minutes",
+			name: "catalog model rate limited - 15 minutes",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
 					modelRateLimitsKey: map[string]any{
 						"claude-sonnet-4-5": map[string]any{
 							"rate_limit_reset_at": future15m,
@@ -464,10 +483,11 @@ func TestGetRateLimitRemainingTime(t *testing.T) {
 			maxExpected:    16 * time.Minute,
 		},
 		{
-			name: "only model rate limited",
+			name: "only catalog model rate limited",
 			account: &Account{
 				Platform: PlatformAntigravity,
 				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
 					modelRateLimitsKey: map[string]any{
 						"claude-sonnet-4-5": map[string]any{
 							"rate_limit_reset_at": future5m,

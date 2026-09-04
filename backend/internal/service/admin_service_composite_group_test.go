@@ -164,6 +164,10 @@ func TestAdminService_UpdateAccountAllowsCompositeGroupAssignment(t *testing.T) 
 }
 
 func TestAdminService_CompositeModelsListCandidatesIncludeConcreteAccountMappings(t *testing.T) {
+	antigravityAccount := Account{ID: 4, Platform: PlatformAntigravity}
+	antigravityAccount.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Models: []string{"gemini-9.9-flash-high", "gemini-9.9-flash-medium", "gemini-9.9-flash-low"},
+	})
 	accountRepo := &accountRepoStubForCompositeModelsList{
 		accounts: []Account{
 			{
@@ -187,6 +191,7 @@ func TestAdminService_CompositeModelsListCandidatesIncludeConcreteAccountMapping
 					"model_mapping": map[string]any{"kimi-custom": "kimi-k2"},
 				},
 			},
+			antigravityAccount,
 		},
 	}
 	groupRepo := &groupRepoStubForAdmin{
@@ -202,8 +207,30 @@ func TestAdminService_CompositeModelsListCandidatesIncludeConcreteAccountMapping
 	require.Contains(t, candidates, "gpt-custom")
 	require.Contains(t, candidates, "gemini-custom")
 	require.Contains(t, candidates, "kimi-custom")
+	require.Contains(t, candidates, "gemini-9.9-flash")
+	require.Contains(t, candidates, "gemini-9.9-flash-medium")
 	require.Contains(t, candidates, "gpt-5.5")
 	require.Contains(t, candidates, "gemini-2.5-flash")
+	require.NotContains(t, candidates, "gemini-3.7-flash")
+}
+
+func TestAdminService_CompositeModelsListCandidatesDoNotInventAntigravityModels(t *testing.T) {
+	svc := &adminServiceImpl{
+		accountRepo: &accountRepoStubForCompositeModelsList{accounts: []Account{{
+			ID:          4,
+			Platform:    PlatformAntigravity,
+			Status:      StatusActive,
+			Schedulable: true,
+		}}},
+		groupRepo: &groupRepoStubForAdmin{getByIDByID: map[int64]*Group{
+			99: {ID: 99, Platform: PlatformComposite},
+		}},
+	}
+
+	candidates, err := svc.GetGroupModelsListCandidates(context.Background(), 99, PlatformComposite)
+
+	require.NoError(t, err)
+	require.Empty(t, candidates)
 }
 
 // 独立 CN 分组的模型列表候选沿用 default 分支的 Claude 默认列表；

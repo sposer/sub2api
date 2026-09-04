@@ -149,7 +149,7 @@ func TestAccountHandlerGetAvailableModels_GrokDefaultsToXAIModelsWithoutMapping(
 	require.Contains(t, ids, "grok-build-0.1")
 }
 
-func TestAccountHandlerGetAvailableModels_AntigravityUsesEffectiveModelMapping(t *testing.T) {
+func TestAccountHandlerGetAvailableModels_AntigravityPreservesExplicitRestriction(t *testing.T) {
 	svc := &availableModelsAdminService{
 		stubAdminService: newStubAdminService(),
 		account: service.Account{
@@ -160,7 +160,7 @@ func TestAccountHandlerGetAvailableModels_AntigravityUsesEffectiveModelMapping(t
 			Status:   service.StatusActive,
 			Credentials: map[string]any{
 				"model_mapping": map[string]any{
-					"gemini-3.7-flash-canary": "gemini-3.7-flash-high",
+					"gemini-canary": "gemini-9.9-flash-high",
 				},
 			},
 		},
@@ -172,21 +172,55 @@ func TestAccountHandlerGetAvailableModels_AntigravityUsesEffectiveModelMapping(t
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-
 	var resp struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.Equal(t, "gemini-canary", resp.Data[0].ID)
+}
 
+func TestAccountHandlerGetAvailableModels_AntigravityUsesLiveCatalog(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       48,
+			Name:     "antigravity-oauth",
+			Platform: service.PlatformAntigravity,
+			Type:     service.AccountTypeOAuth,
+			Status:   service.StatusActive,
+		},
+	}
+	svc.account.SetUpstreamModelCatalogSnapshot(service.UpstreamModelCatalogSnapshot{
+		Source: "upstream",
+		Models: []string{
+			"gemini-9.9-flash-high",
+			"gemini-9.9-flash-low",
+			"gemini-9.9-flash-medium",
+			"gemini-9.9-flash-tiered",
+		},
+	})
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/48/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	ids := make([]string, 0, len(resp.Data))
 	for _, model := range resp.Data {
 		ids = append(ids, model.ID)
 	}
-	require.Contains(t, ids, "gemini-3.7-flash")
-	require.Contains(t, ids, "gemini-3.7-flash-high")
-	require.Contains(t, ids, "gemini-3.7-flash-canary")
+	require.Contains(t, ids, "gemini-9.9-flash")
+	require.Contains(t, ids, "gemini-9.9-flash-medium")
 }
 
 func TestAccountHandlerGetAvailableModels_OpenAIOAuthUsesExplicitModelMapping(t *testing.T) {

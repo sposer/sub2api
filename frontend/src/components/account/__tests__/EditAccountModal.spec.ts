@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, syncUpstreamModelsMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
+  syncUpstreamModelsMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
@@ -28,7 +29,8 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       update: updateAccountMock,
-      checkMixedChannelRisk: checkMixedChannelRiskMock
+      checkMixedChannelRisk: checkMixedChannelRiskMock,
+      syncUpstreamModels: syncUpstreamModelsMock
     },
     settings: {
       getWebSearchEmulationConfig: vi.fn().mockResolvedValue({ enabled: false, providers: [] }),
@@ -38,10 +40,6 @@ vi.mock('@/api/admin', () => ({
       list: vi.fn().mockResolvedValue([])
     }
   }
-}))
-
-vi.mock('@/api/admin/accounts', () => ({
-  getAntigravityDefaultModelMapping: vi.fn()
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -326,6 +324,10 @@ function mountModal(account = buildAccount()) {
 describe('EditAccountModal', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({
+      models: [],
+      availability_source: 'live'
+    })
   })
 
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
@@ -1375,6 +1377,30 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.antigravity_project_id).toBe(
       'updated-project'
     )
+  })
+
+  it('syncs the Antigravity live catalog without freezing it into explicit mappings', async () => {
+    const account = buildAntigravityAccount()
+    syncUpstreamModelsMock.mockResolvedValue({
+      models: ['gemini-2.5-flash', 'gemini-9.9-flash-medium'],
+      availability_source: 'live'
+    })
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const syncButton = wrapper.findAll('button').find(
+      button => button.text().trim() === 'admin.accounts.syncUpstreamModels'
+    )
+
+    expect(syncButton).toBeDefined()
+    await syncButton!.trigger('click')
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(account.id)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-2.5-flash': 'gemini-2.5-flash'
+    })
   })
 
   it('clears Antigravity configured project fallback when input is empty', async () => {

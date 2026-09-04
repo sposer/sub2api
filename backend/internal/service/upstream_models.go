@@ -19,11 +19,14 @@ import (
 )
 
 const (
-	upstreamModelsBodyLimit             int64 = 8 << 20
-	modelsDevRegistryURL                      = "https://models.dev/api.json"
-	modelsDevRegistryTTL                      = 6 * time.Hour
-	UpstreamModelMetadataExtraKey             = "upstream_model_metadata"
-	UpstreamModelMetadataIncompleteCode       = "upstream_model_metadata_incomplete"
+	upstreamModelsBodyLimit                   int64 = 8 << 20
+	modelsDevRegistryURL                            = "https://models.dev/api.json"
+	modelsDevRegistryTTL                            = 6 * time.Hour
+	UpstreamModelCatalogExtraKey                    = "upstream_model_catalog"
+	UpstreamModelMetadataExtraKey                   = "upstream_model_metadata"
+	UpstreamModelMetadataIncompleteCode             = "upstream_model_metadata_incomplete"
+	UpstreamModelAvailabilitySourceLive             = "live"
+	UpstreamModelAvailabilitySourceConfigured       = "configured"
 )
 
 type UpstreamModelMetadata struct {
@@ -38,6 +41,12 @@ type UpstreamModelMetadata struct {
 	MaxOutputTokens          int64    `json:"max_output_tokens,omitempty"`
 }
 
+type UpstreamModelCatalogSnapshot struct {
+	Source   string   `json:"source"`
+	SyncedAt string   `json:"synced_at"`
+	Models   []string `json:"models"`
+}
+
 type UpstreamModelMetadataSnapshot struct {
 	Source   string                           `json:"source"`
 	SyncedAt string                           `json:"synced_at"`
@@ -45,9 +54,10 @@ type UpstreamModelMetadataSnapshot struct {
 }
 
 type UpstreamModelCatalog struct {
-	Models   []string                         `json:"models"`
-	Metadata map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
-	Warnings []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
+	Models             []string                         `json:"models"`
+	Metadata           map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
+	Warnings           []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
+	AvailabilitySource string                           `json:"availability_source"`
 }
 
 type UpstreamModelSyncWarning struct {
@@ -85,6 +95,47 @@ type modelsDevModalities struct {
 type modelsDevLimit struct {
 	Context int64 `json:"context"`
 	Output  int64 `json:"output"`
+}
+
+func (a *Account) SetUpstreamModelCatalogSnapshot(snapshot UpstreamModelCatalogSnapshot) {
+	if a == nil {
+		return
+	}
+	if a.Extra == nil {
+		a.Extra = make(map[string]any)
+	}
+	a.Extra[UpstreamModelCatalogExtraKey] = snapshot
+}
+
+func (a *Account) GetUpstreamModelCatalogSnapshot() *UpstreamModelCatalogSnapshot {
+	if a == nil || a.Extra == nil {
+		return nil
+	}
+	if raw, ok := a.Extra[UpstreamModelCatalogExtraKey]; ok && raw != nil {
+		body, err := json.Marshal(raw)
+		if err == nil {
+			var snapshot UpstreamModelCatalogSnapshot
+			if json.Unmarshal(body, &snapshot) == nil {
+				snapshot.Models = dedupeAndSortModelIDs(snapshot.Models)
+				return &snapshot
+			}
+		}
+	}
+
+	return nil
+}
+
+func stripUpstreamModelManagedExtra(extra map[string]any) {
+	delete(extra, UpstreamModelCatalogExtraKey)
+	delete(extra, UpstreamModelMetadataExtraKey)
+}
+
+func (a *Account) GetUpstreamModelCatalogIDs() []string {
+	snapshot := a.GetUpstreamModelCatalogSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	return append([]string(nil), snapshot.Models...)
 }
 
 func (a *Account) SetUpstreamModelMetadataSnapshot(snapshot UpstreamModelMetadataSnapshot) {
@@ -195,16 +246,17 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 	return models, err
 }
 
-// SyncUpstreamModelCatalog fetches the account's live model list, enriches
-// missing capability fields from the provider registry used by the upstream,
-// and persists a normalized account snapshot when metadata is available.
+// SyncUpstreamModelCatalog fetches the account's model list, persists the IDs,
+// and enriches complete capability metadata when the upstream exposes it.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
 	models, body, err := s.fetchUpstreamModelList(ctx, account)
+	availabilitySource := UpstreamModelAvailabilitySourceLive
 	if err != nil {
 		configuredModels := configuredUpstreamModelsForCapabilitySync(account)
 		if !upstreamModelListEndpointUnsupported(err) || len(configuredModels) == 0 {
 			return nil, err
 		}
+		availabilitySource = UpstreamModelAvailabilitySourceConfigured
 		models = configuredModels
 		body = nil
 		slog.Info("upstream model list endpoint unavailable; using configured models for capability sync",
@@ -214,7 +266,12 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			"model_count", len(models),
 		)
 	}
-	catalog := &UpstreamModelCatalog{Models: models, Metadata: make(map[string]UpstreamModelMetadata)}
+	models = dedupeAndSortModelIDs(models)
+	catalog := &UpstreamModelCatalog{
+		Models:             models,
+		Metadata:           make(map[string]UpstreamModelMetadata),
+		AvailabilitySource: availabilitySource,
+	}
 	if len(body) > 0 {
 		_, directMetadata, parseErr := extractUpstreamModelCatalog(body, account != nil && account.IsGrok())
 		if parseErr == nil {
@@ -222,16 +279,15 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		}
 	}
 
-	source := "upstream"
-	metadataIncomplete := upstreamCatalogNeedsRegistry(models, catalog.Metadata)
-	if metadataIncomplete {
+	metadataSource := "upstream"
+	if upstreamCatalogNeedsRegistry(models, catalog.Metadata) {
 		if registryMetadata, registryErr := s.fetchModelsDevMetadata(ctx, account, models); registryErr == nil {
 			for modelID, fallback := range registryMetadata {
 				current := catalog.Metadata[modelID]
 				merged, changed := mergeUpstreamModelMetadata(current, fallback)
 				catalog.Metadata[modelID] = merged
 				if changed {
-					source = "models.dev"
+					metadataSource = "models.dev"
 				}
 			}
 		} else {
@@ -243,25 +299,52 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		}
 	}
 
-	if upstreamCatalogNeedsRegistry(models, catalog.Metadata) {
+	metadataComplete := !upstreamCatalogNeedsRegistry(models, catalog.Metadata)
+	if !metadataComplete {
 		catalog.Warnings = append(catalog.Warnings, UpstreamModelSyncWarning{
 			Code:    UpstreamModelMetadataIncompleteCode,
 			Message: "Model IDs were synced, but capability metadata is incomplete.",
 		})
+	}
+	if account == nil || account.ID <= 0 || s.accountRepo == nil {
 		return catalog, nil
 	}
-	if len(catalog.Metadata) == 0 || account == nil || account.ID <= 0 || s.accountRepo == nil {
+
+	syncedAt := time.Now().UTC().Format(time.RFC3339)
+	updates := make(map[string]any, 2)
+	var catalogSnapshot *UpstreamModelCatalogSnapshot
+	// decision: only a successful live list can become implicit availability; not
+	// configured fallback IDs because removing the explicit mapping must remove access.
+	if availabilitySource == UpstreamModelAvailabilitySourceLive {
+		catalogSnapshot = &UpstreamModelCatalogSnapshot{Source: "upstream", SyncedAt: syncedAt, Models: models}
+		updates[UpstreamModelCatalogExtraKey] = *catalogSnapshot
+	}
+	var metadataSnapshot *UpstreamModelMetadataSnapshot
+	if metadataComplete && len(catalog.Metadata) > 0 {
+		metadataSnapshot = &UpstreamModelMetadataSnapshot{
+			Source:   metadataSource,
+			SyncedAt: syncedAt,
+			Models:   catalog.Metadata,
+		}
+		updates[UpstreamModelMetadataExtraKey] = *metadataSnapshot
+	}
+	if len(updates) == 0 {
 		return catalog, nil
 	}
-	snapshot := UpstreamModelMetadataSnapshot{
-		Source:   source,
-		SyncedAt: time.Now().UTC().Format(time.RFC3339),
-		Models:   catalog.Metadata,
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+		return nil, newUpstreamModelSyncInternalError("Failed to save upstream model data", err)
 	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{UpstreamModelMetadataExtraKey: snapshot}); err != nil {
-		return nil, newUpstreamModelSyncInternalError("Failed to save upstream model metadata", err)
+	if catalogSnapshot != nil {
+		account.SetUpstreamModelCatalogSnapshot(*catalogSnapshot)
+		// decision: invalidate every cached group view for this platform; not one group
+		// because an account may contribute its catalog to multiple groups.
+		if s.modelsCacheInvalidator != nil {
+			s.modelsCacheInvalidator.InvalidateAvailableModelsCache(nil, account.Platform)
+		}
 	}
-	account.SetUpstreamModelMetadataSnapshot(snapshot)
+	if metadataSnapshot != nil {
+		account.SetUpstreamModelMetadataSnapshot(*metadataSnapshot)
+	}
 	return catalog, nil
 }
 
@@ -573,7 +656,9 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return nil, nil, newUpstreamModelSyncConfigError("Account is required", nil)
 	}
 
-	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
+	if account.Platform == PlatformAntigravity &&
+		account.Type != AccountTypeAPIKey &&
+		account.Type != AccountTypeUpstream {
 		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 		return models, nil, err
 	}
@@ -620,7 +705,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	if err != nil {
 		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response was not valid JSON", err)
 	}
-	if len(models) == 0 {
+	if len(models) == 0 && account.Platform != PlatformAntigravity {
 		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
 
@@ -630,7 +715,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
 	switch {
 	case account.Platform == PlatformAntigravity:
-		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
+		return s.buildAntigravityRelayModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
 	case account.IsOpenAI() || account.IsCNProvider():
@@ -798,8 +883,8 @@ func (s *AccountTestService) buildAnthropicUpstreamModelsRequest(ctx context.Con
 	return req, nil
 }
 
-func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
-	if account.Type != AccountTypeAPIKey {
+func (s *AccountTestService) buildAntigravityRelayModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
+	if account.Type != AccountTypeAPIKey && account.Type != AccountTypeUpstream {
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported Antigravity account type for upstream model sync: %s", account.Type), nil,
 		)
@@ -809,16 +894,16 @@ func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Con
 		return nil, newUpstreamModelSyncConfigError("No Antigravity API key is available", nil)
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/")
-	if baseURL == "" {
-		return nil, newUpstreamModelSyncConfigError("Antigravity API-key base URL is required for upstream model sync", nil)
+	configuredBaseURL := strings.TrimSpace(account.GetCredential("base_url"))
+	if configuredBaseURL == "" {
+		return nil, newUpstreamModelSyncConfigError("Antigravity relay base URL is required for upstream model sync", nil)
 	}
-	if !strings.HasSuffix(strings.ToLower(baseURL), "/antigravity") {
-		return nil, newUpstreamModelSyncUnsupportedError(
-			"Antigravity API-key upstream model sync requires a compatible gateway base URL ending in /antigravity; use Antigravity OAuth for official Cloud Code upstreams",
-			nil,
-		)
+	baseURL := strings.TrimRight(configuredBaseURL, "/")
+	if account.Type == AccountTypeAPIKey {
+		baseURL = account.GetBaseURL()
 	}
+	// decision: API-key model sync reuses GetBaseURL, not its own suffix contract,
+	// because forwarding and discovery address the same /antigravity gateway owner.
 	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid Antigravity base URL", err)
@@ -834,7 +919,9 @@ func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Con
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("x-api-key", apiKey)
+	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
 }
 
@@ -1004,6 +1091,7 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 	}
 	modelsResp, _, err := client.FetchAvailableModels(
 		ctx,
+		[]string{resolveAntigravityForwardBaseURL(account)},
 		accessToken,
 		strings.TrimSpace(account.GetCredential("project_id")),
 		resolveModelsListReadLimit(s.cfg),
@@ -1011,8 +1099,8 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch Antigravity available models", err)
 	}
-	if modelsResp == nil || len(modelsResp.Models) == 0 {
-		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+	if modelsResp == nil {
+		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no model catalog", nil)
 	}
 
 	models := make([]string, 0, len(modelsResp.Models))

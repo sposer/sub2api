@@ -189,16 +189,25 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
-		// 模型兜底：模型不存在且开启 fallback 时，自动用 fallback 模型重试一次
+		// 模型兜底：模型不存在且开启 fallback 时，只能重试该账号显式映射或实时目录中的模型。
+		// decision: fallback reuses account resolution and the active forward endpoint; not a
+		// raw global model ID or fixed production endpoint because both bypass account availability.
 		if s.settingService != nil && s.settingService.IsModelFallbackEnabled(ctx) &&
 			isModelNotFoundError(resp.StatusCode, respBody) {
-			fallbackModel := s.settingService.GetFallbackModel(ctx, PlatformAntigravity)
-			if fallbackModel != "" && fallbackModel != mappedModel {
+			fallbackRequestModel := s.settingService.GetFallbackModel(ctx, PlatformAntigravity)
+			fallbackModel, supported := account.ResolveAntigravityModel(fallbackRequestModel)
+			if supported && fallbackModel != mappedModel {
 				logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Model not found (%s), retrying with fallback model %s (account: %s)", mappedModel, fallbackModel, account.Name)
 
 				fallbackWrapped, err := s.wrapV1InternalRequest(projectID, fallbackModel, injectedBody)
 				if err == nil {
-					fallbackReq, err := antigravity.NewAPIRequest(ctx, upstreamAction, accessToken, fallbackWrapped)
+					fallbackReq, err := antigravity.NewAPIRequestWithURL(
+						ctx,
+						resolveAntigravityForwardBaseURL(account),
+						upstreamAction,
+						accessToken,
+						fallbackWrapped,
+					)
 					if err == nil {
 						fallbackResp, err := s.httpUpstream.Do(fallbackReq, proxyURL, account.ID, account.Concurrency)
 						if err == nil && fallbackResp.StatusCode < 400 {

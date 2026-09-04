@@ -736,6 +736,9 @@ func TestAntigravityRetryLoop_PreCheck_NoSingleAccountRetry_SwitchesOnRateLimit(
 		Status:      StatusActive,
 		Concurrency: 1,
 		Extra: map[string]any{
+			UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{
+				Models: []string{"claude-sonnet-4-5"},
+			},
 			modelRateLimitsKey: map[string]any{
 				"claude-sonnet-4-5": map[string]any{
 					"rate_limit_reset_at": time.Now().Add(30 * time.Second).Format(time.RFC3339),

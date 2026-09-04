@@ -5,7 +5,6 @@ package service
 import (
 	"testing"
 
-	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
@@ -345,86 +344,6 @@ func TestAccountGetMappedModel(t *testing.T) {
 	}
 }
 
-func TestAccountGetModelMapping_AntigravityNormalizesGemini31ProAliases(t *testing.T) {
-	t.Parallel()
-
-	account := &Account{
-		Platform: PlatformAntigravity,
-		Credentials: map[string]any{
-			"model_mapping": map[string]any{
-				domain.AntigravityGemini31ProAgentModel: domain.AntigravityGemini31ProAgentModel,
-				"gemini-3.1-pro-high":                   "gemini-3.1-pro-high",
-				"gemini-3.1-pro-preview":                "gemini-3.1-pro-high",
-			},
-		},
-	}
-
-	mapping := account.GetModelMapping()
-
-	if got := mapping["gemini-3.1-pro"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro to map to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
-	}
-	if got := mapping["gemini-3.1-pro-high"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro-high to map to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
-	}
-	if got := mapping["gemini-3.1-pro-preview"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro-preview to map to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
-	}
-}
-
-func TestAccountGetModelMapping_AntigravityPreservesGemini31ProOverrides(t *testing.T) {
-	t.Parallel()
-
-	account := &Account{
-		Platform: PlatformAntigravity,
-		Credentials: map[string]any{
-			"model_mapping": map[string]any{
-				domain.AntigravityGemini31ProAgentModel: domain.AntigravityGemini31ProAgentModel,
-				"gemini-3.1-pro-high":                   "custom-high",
-				"gemini-3.1-pro-preview":                "custom-preview",
-			},
-		},
-	}
-
-	mapping := account.GetModelMapping()
-
-	if got := mapping["gemini-3.1-pro-high"]; got != "custom-high" {
-		t.Fatalf("expected gemini-3.1-pro-high override to be preserved, got %q", got)
-	}
-	if got := mapping["gemini-3.1-pro-preview"]; got != "custom-preview" {
-		t.Fatalf("expected gemini-3.1-pro-preview override to be preserved, got %q", got)
-	}
-	if got := mapping["gemini-3.1-pro"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro alias to default to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
-	}
-}
-
-func TestAccountGetModelMapping_AntigravityGemini31ProAliasesRespectWildcard(t *testing.T) {
-	t.Parallel()
-
-	account := &Account{
-		Platform: PlatformAntigravity,
-		Credentials: map[string]any{
-			"model_mapping": map[string]any{
-				domain.AntigravityGemini31ProAgentModel: domain.AntigravityGemini31ProAgentModel,
-				"gemini-3.1-*":                          "custom-wildcard",
-			},
-		},
-	}
-
-	mapping := account.GetModelMapping()
-
-	if got := mapping["gemini-3.1-pro"]; got != "" {
-		t.Fatalf("expected gemini-3.1-pro exact alias to stay unset when wildcard exists, got %q", got)
-	}
-	if got := mapping["gemini-3.1-pro-high"]; got != "" {
-		t.Fatalf("expected gemini-3.1-pro-high exact alias to stay unset when wildcard exists, got %q", got)
-	}
-	if got := mapping["gemini-3.1-pro-preview"]; got != "" {
-		t.Fatalf("expected gemini-3.1-pro-preview exact alias to stay unset when wildcard exists, got %q", got)
-	}
-}
-
 func TestAccountResolveMappedModel(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -515,33 +434,42 @@ func TestAccountResolveMappedModel(t *testing.T) {
 	}
 }
 
-func TestAccountGetModelMapping_AntigravityEnsuresGeminiDefaultPassthroughs(t *testing.T) {
+func TestAccountGetModelMapping_AntigravityPreservesExplicitRestriction(t *testing.T) {
 	account := &Account{
 		Platform: PlatformAntigravity,
 		Credentials: map[string]any{
 			"model_mapping": map[string]any{
-				"gemini-3-pro-high": "gemini-3.1-pro-high",
+				"gemini-canary": "gemini-9.9-flash-high",
 			},
 		},
 	}
 
 	mapping := account.GetModelMapping()
-	if mapping["gemini-3-flash"] != "gemini-3-flash" {
-		t.Fatalf("expected gemini-3-flash passthrough to be auto-filled, got: %q", mapping["gemini-3-flash"])
+	if len(mapping) != 1 || mapping["gemini-canary"] != "gemini-9.9-flash-high" {
+		t.Fatalf("explicit Antigravity mapping must not be expanded by defaults: %v", mapping)
 	}
-	if mapping["gemini-3.1-pro-high"] != "gemini-3.1-pro-high" {
-		t.Fatalf("expected gemini-3.1-pro-high passthrough to be auto-filled, got: %q", mapping["gemini-3.1-pro-high"])
+}
+
+func TestAccountGetModelMapping_AntigravityDerivesTierAliasFromCatalogMapping(t *testing.T) {
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gemini-9.9-flash-high":   "gemini-9.9-flash-high",
+				"gemini-9.9-flash-medium": "gemini-9.9-flash-medium",
+				"gemini-9.9-flash-low":    "gemini-9.9-flash-low",
+				"gemini-9.9-flash-tiered": "gemini-9.9-flash-tiered",
+				"gpt-oss-120b-medium":     "gpt-oss-120b-medium",
+			},
+		},
 	}
-	if mapping["gemini-3.1-pro-low"] != "gemini-3.1-pro-low" {
-		t.Fatalf("expected gemini-3.1-pro-low passthrough to be auto-filled, got: %q", mapping["gemini-3.1-pro-low"])
+
+	mapping := account.GetModelMapping()
+	if got := mapping["gemini-9.9-flash"]; got != "gemini-9.9-flash-medium" {
+		t.Fatalf("expected catalog-derived base alias to use medium tier, got %q", got)
 	}
-	if mapping["gemini-3.7-flash"] != "gemini-3.7-flash-medium" {
-		t.Fatalf("expected gemini-3.7-flash to default to medium tier, got: %q", mapping["gemini-3.7-flash"])
-	}
-	for _, model := range []string{"gemini-3.7-flash-high", "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-tiered"} {
-		if mapping[model] != model {
-			t.Fatalf("expected %s passthrough to be auto-filled, got: %q", model, mapping[model])
-		}
+	if _, exists := mapping["gpt-oss-120b"]; exists {
+		t.Fatal("non-Gemini medium model must not create a tier alias")
 	}
 }
 
@@ -622,6 +550,58 @@ func TestAccountGetModelMapping_AntigravityRespectsWildcardOverride(t *testing.T
 	}
 	if mapped := account.GetMappedModel("gemini-3.7-flash"); mapped != "gemini-3.1-pro-high" {
 		t.Fatalf("expected Gemini 3.7 wildcard mapping to stay effective, got: %q", mapped)
+	}
+}
+
+func TestResolveAntigravityWebSearchModelUsesAccountAvailability(t *testing.T) {
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"claude-current": "claude-current",
+				"search-model":   "gemini-9.9-flash-medium",
+			},
+		},
+	}
+
+	model, supported := account.ResolveAntigravityWebSearchModel("claude-current")
+	if !supported || model != "gemini-9.9-flash-medium" {
+		t.Fatalf("expected mapped Gemini search target, got model=%q supported=%v", model, supported)
+	}
+
+	model, supported = account.ResolveAntigravityWebSearchModel("gemini-9.8-pro-high")
+	if !supported || model != "gemini-9.8-pro-high" {
+		t.Fatalf("expected already resolved Gemini target to remain unchanged, got model=%q supported=%v", model, supported)
+	}
+}
+
+func TestResolveAntigravityWebSearchModelUsesDerivedLiveFlashAlias(t *testing.T) {
+	account := &Account{Platform: PlatformAntigravity}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{Models: []string{
+		"claude-current",
+		"gemini-9.9-flash-high",
+		"gemini-9.9-flash-low",
+		"gemini-9.9-flash-medium",
+	}})
+
+	model, supported := account.ResolveAntigravityWebSearchModel("claude-current")
+	if !supported || model != "gemini-9.9-flash-medium" {
+		t.Fatalf("expected live Flash base alias to resolve to medium, got model=%q supported=%v", model, supported)
+	}
+}
+
+func TestResolveAntigravityWebSearchModelDoesNotBypassExplicitMapping(t *testing.T) {
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"claude-current": "claude-current"},
+		},
+	}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{Models: []string{"gemini-9.9-flash-medium"}})
+
+	model, supported := account.ResolveAntigravityWebSearchModel("claude-current")
+	if supported || model != "" {
+		t.Fatalf("explicit mapping must not fall through to live catalog, got model=%q supported=%v", model, supported)
 	}
 }
 

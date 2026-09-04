@@ -9,7 +9,6 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
@@ -73,6 +72,25 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 		return nil, err
 	}
 
+	// decision: existing composite groups expose defaults only for schedulable
+	// platforms; not every provider default because the public list uses the same boundary.
+	// Antigravity contributes only its live catalog.
+	if platform == PlatformComposite {
+		candidates = nil
+		schedulablePlatforms := make(map[string]struct{})
+		for _, account := range accounts {
+			if isConcreteRequestPlatform(account.Platform) {
+				schedulablePlatforms[account.Platform] = struct{}{}
+			}
+		}
+		for _, candidatePlatform := range []string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek} {
+			if _, ok := schedulablePlatforms[candidatePlatform]; !ok || IsCNProvider(candidatePlatform) {
+				continue
+			}
+			candidates = append(candidates, defaultModelsListCandidateIDs(candidatePlatform)...)
+		}
+	}
+
 	seen := make(map[string]struct{}, len(candidates))
 	for _, model := range candidates {
 		seen[model] = struct{}{}
@@ -85,7 +103,15 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 		} else if acc.Platform != platform {
 			continue
 		}
-		for model := range acc.GetModelMapping() {
+		accountModels := make([]string, 0)
+		if acc.Platform == PlatformAntigravity {
+			accountModels = acc.GetAntigravityAvailableModelIDs()
+		} else {
+			for model := range acc.GetModelMapping() {
+				accountModels = append(accountModels, model)
+			}
+		}
+		for _, model := range accountModels {
 			model = strings.TrimSpace(model)
 			if model == "" {
 				continue
@@ -239,12 +265,7 @@ func defaultModelsListCandidateIDs(platform string) []string {
 		}
 		return ids
 	case PlatformAntigravity:
-		models := antigravity.DefaultModels()
-		ids := make([]string, 0, len(models))
-		for _, model := range models {
-			ids = append(ids, model.ID)
-		}
-		return ids
+		return nil
 	case PlatformGrok:
 		return xai.DefaultModelIDs()
 	case PlatformComposite:

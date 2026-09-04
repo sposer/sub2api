@@ -56,10 +56,6 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
-vi.mock('@/api/admin/accounts', () => ({
-  getAntigravityDefaultModelMapping: vi.fn().mockResolvedValue([]),
-}))
-
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
@@ -199,7 +195,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     authIsSimpleMode.value = true
     createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
-    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {}, availability_source: 'live' })
     showWarningMock.mockReset()
     importCodexSessionMock.mockReset().mockResolvedValue({
       created: 1,
@@ -296,6 +292,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   it('warns when post-create capability metadata remains incomplete', async () => {
     syncUpstreamModelsMock.mockResolvedValue({
       models: ['x-preview-f-free'],
+      availability_source: 'live',
       warnings: [{ code: 'upstream_model_metadata_incomplete', message: 'metadata incomplete' }],
     })
     const wrapper = mountModal()
@@ -491,7 +488,9 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(payload?.platform).toBe('antigravity')
     expect(payload?.type).toBe('apikey')
     expect(payload?.upstream_billing_probe_enabled).toBe(true)
-    // 创建成功后前端立即发起一次首探（与其他 apikey 平台一致）。
+    expect(payload?.credentials?.model_mapping).toBeUndefined()
+    // 创建成功后同步实时模型目录，并立即发起一次倍率首探。
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
     expect(probeUpstreamBillingMock).toHaveBeenCalledWith(42)
   })
 

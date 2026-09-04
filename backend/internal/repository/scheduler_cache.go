@@ -987,6 +987,9 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"quota_weekly_reset_hour",
 		"quota_reset_timezone",
 		"mixed_scheduling",
+		// decision: keep the live Antigravity catalog in scheduler metadata; not
+		// hydrate it only after selection because model support is evaluated first.
+		service.UpstreamModelCatalogExtraKey,
 		"window_cost_limit",
 		"window_cost_sticky_reserve",
 		"max_sessions",

@@ -27,6 +27,14 @@ type mockAccountRepoForPlatform struct {
 	getByIDCalls     int
 }
 
+type mockAccountRepoForCompositeCatalog struct {
+	*mockAccountRepoForPlatform
+}
+
+func (m *mockAccountRepoForCompositeCatalog) ListSchedulableByGroupID(_ context.Context, _ int64) ([]Account, error) {
+	return append([]Account(nil), m.accounts...), nil
+}
+
 func (m *mockAccountRepoForPlatform) GetByID(ctx context.Context, id int64) (*Account, error) {
 	m.getByIDCalls++
 	if acc, ok := m.accountsByID[id]; ok {
@@ -450,6 +458,46 @@ func TestGatewayService_SelectAccountForModelWithExclusions_CompositeAliasRequir
 	require.Equal(t, int64(2), account.ID)
 }
 
+func TestGatewayService_SelectAccountForModelWithExclusions_CompositeCatalogSelectsAntigravityOwner(t *testing.T) {
+	groupID := int64(78)
+	account := Account{
+		ID:            2,
+		Platform:      PlatformAntigravity,
+		Type:          AccountTypeOAuth,
+		Priority:      1,
+		Status:        StatusActive,
+		Schedulable:   true,
+		AccountGroups: []AccountGroup{{GroupID: groupID}},
+	}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Models: []string{"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"},
+	})
+	repo := &mockAccountRepoForPlatform{
+		accounts:     []Account{account},
+		accountsByID: map[int64]*Account{account.ID: &account},
+	}
+	group := &Group{ID: groupID, Platform: PlatformComposite, Status: StatusActive, Hydrated: true}
+	svc := &GatewayService{
+		accountRepo: repo,
+		groupRepo:   &mockGroupRepoForGateway{groups: map[int64]*Group{groupID: group}},
+		cfg:         testConfig(),
+	}
+	ctx := WithCompositeRouteDecision(context.Background(), CompositeRouteDecision{
+		Matched:        true,
+		Source:         CompositeRouteSourceAccount,
+		GroupID:        groupID,
+		PublicModel:    "gemini-3.8-flash",
+		TargetPlatform: PlatformAntigravity,
+		UpstreamModel:  "gemini-3.8-flash-medium",
+		Endpoint:       CompositeRouteEndpointGemini,
+	})
+
+	selected, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "gemini-3.8-flash", nil)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.Equal(t, account.ID, selected.ID)
+}
+
 // TestGatewayService_SelectAccountForModelWithPlatform_Antigravity 测试 antigravity 单平台选择
 func TestGatewayService_SelectAccountForModelWithPlatform_Antigravity(t *testing.T) {
 	ctx := context.Background()
@@ -457,7 +505,12 @@ func TestGatewayService_SelectAccountForModelWithPlatform_Antigravity(t *testing
 	repo := &mockAccountRepoForPlatform{
 		accounts: []Account{
 			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true}, // 应被隔离
-			{ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true},
+			{
+				ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+				Extra: map[string]any{
+					UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
+				},
+			},
 		},
 		accountsByID: map[int64]*Account{},
 	}
@@ -795,7 +848,10 @@ func TestGatewayService_SelectAccountForModelWithExclusions_ForcePlatform(t *tes
 	repo := &mockAccountRepoForPlatform{
 		accounts: []Account{
 			{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
-			{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true},
+			{
+				ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true,
+				Extra: antigravityTestExtra([]string{"claude-sonnet-4-5"}, nil),
+			},
 		},
 		accountsByID: map[int64]*Account{},
 	}
@@ -1194,8 +1250,28 @@ func TestGatewayService_SelectAccountForModelWithPlatform_NoAccounts(t *testing.
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
 }
 
+func TestGatewayServiceResolveCompositeModelOwnershipUsesAntigravityCatalog(t *testing.T) {
+	account := Account{ID: 10, Platform: PlatformAntigravity, Status: StatusActive, Schedulable: true}
+	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Models: []string{"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"},
+	})
+	svc := &GatewayService{accountRepo: &mockAccountRepoForCompositeCatalog{
+		mockAccountRepoForPlatform: &mockAccountRepoForPlatform{accounts: []Account{account}},
+	}}
+
+	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), 77, "gemini-3.8-flash")
+	require.NoError(t, err)
+	require.True(t, ownership.Matched)
+	require.False(t, ownership.Ambiguous)
+	require.Equal(t, PlatformAntigravity, ownership.TargetPlatform)
+}
+
 func TestGatewayService_isModelSupportedByAccount(t *testing.T) {
 	svc := &GatewayService{}
+	antigravityWithCatalog := &Account{Platform: PlatformAntigravity}
+	antigravityWithCatalog.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
+		Models: []string{"gemini-9.9-flash-high", "gemini-9.9-flash-medium", "gemini-9.9-flash-low"},
+	})
 
 	tests := []struct {
 		name     string
@@ -1204,26 +1280,26 @@ func TestGatewayService_isModelSupportedByAccount(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "Antigravity平台-支持默认映射中的claude模型",
+			name:     "Antigravity平台-无映射或目录时拒绝",
 			account:  &Account{Platform: PlatformAntigravity},
-			model:    "claude-sonnet-4-5",
-			expected: true,
-		},
-		{
-			name:     "Antigravity平台-不支持非默认映射中的claude模型",
-			account:  &Account{Platform: PlatformAntigravity},
-			model:    "claude-3-5-sonnet-20241022",
+			model:    "claude-future",
 			expected: false,
 		},
 		{
-			name:     "Antigravity平台-支持gemini模型",
-			account:  &Account{Platform: PlatformAntigravity},
-			model:    "gemini-2.5-flash",
+			name:     "Antigravity平台-实时目录支持未来模型",
+			account:  antigravityWithCatalog,
+			model:    "gemini-9.9-flash-high",
 			expected: true,
 		},
 		{
-			name:     "Antigravity平台-不支持gpt模型",
-			account:  &Account{Platform: PlatformAntigravity},
+			name:     "Antigravity平台-实时目录支持派生基础别名",
+			account:  antigravityWithCatalog,
+			model:    "gemini-9.9-flash",
+			expected: true,
+		},
+		{
+			name:     "Antigravity平台-实时目录拒绝未声明模型",
+			account:  antigravityWithCatalog,
 			model:    "gpt-4",
 			expected: false,
 		},
@@ -1292,6 +1368,23 @@ func TestGatewayService_isModelSupportedByAccount(t *testing.T) {
 }
 
 // TestGatewayService_selectAccountWithMixedScheduling 测试混合调度
+func antigravityTestExtra(models []string, extra map[string]any) map[string]any {
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	extra[UpstreamModelCatalogExtraKey] = UpstreamModelCatalogSnapshot{Models: models}
+	return extra
+}
+
+func antigravityMixedSchedulingTestExtra() map[string]any {
+	return antigravityTestExtra([]string{
+		"claude-3-5-sonnet-20241022",
+		"claude-sonnet-4-5",
+		"gemini-2.5-pro",
+		"gemini-3-pro-preview",
+	}, map[string]any{"mixed_scheduling": true})
+}
+
 func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 	ctx := context.Background()
 
@@ -1325,7 +1418,10 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 2, Status: StatusActive, Schedulable: true},
-				{ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+				{
+					ID: 2, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true,
+					Extra: antigravityTestExtra([]string{"claude-sonnet-4-5"}, map[string]any{"mixed_scheduling": true}),
+				},
 			},
 			accountsByID: map[int64]*Account{},
 		}
@@ -1358,7 +1454,8 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Status:      StatusActive,
 					Schedulable: true,
 					Extra: map[string]any{
-						"mixed_scheduling": true,
+						"mixed_scheduling":           true,
+						UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-3-pro-preview"}},
 						modelRateLimitsKey: map[string]any{
 							antigravityGeminiModelRateLimitKey: map[string]any{
 								"rate_limit_reset_at": resetAt,
@@ -1373,7 +1470,8 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Status:      StatusActive,
 					Schedulable: true,
 					Extra: map[string]any{
-						"mixed_scheduling": true,
+						"mixed_scheduling":           true,
+						UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"gemini-3-pro-preview"}},
 						modelRateLimitsKey: map[string]any{
 							antigravityGeminiModelRateLimitKey: map[string]any{
 								"rate_limit_reset_at": resetAt,
@@ -1387,7 +1485,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Priority:    2,
 					Status:      StatusActive,
 					Schedulable: true,
-					Extra:       map[string]any{"mixed_scheduling": true},
+					Extra:       antigravityTestExtra([]string{"gemini-3-pro-preview"}, map[string]any{"mixed_scheduling": true}),
 				},
 			},
 			accountsByID: map[int64]*Account{},
@@ -1419,7 +1517,8 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 					Status:      StatusActive,
 					Schedulable: true,
 					Extra: map[string]any{
-						"mixed_scheduling": true,
+						"mixed_scheduling":           true,
+						UpstreamModelCatalogExtraKey: UpstreamModelCatalogSnapshot{Models: []string{"claude-sonnet-4-5"}},
 						modelRateLimitsKey: map[string]any{
 							antigravityGeminiModelRateLimitKey: map[string]any{
 								"rate_limit_reset_at": resetAt,
@@ -1453,7 +1552,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
-				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: antigravityMixedSchedulingTestExtra()},
 			},
 			accountsByID: map[int64]*Account{},
 		}
@@ -1498,7 +1597,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
-				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}, AccountGroups: []AccountGroup{{GroupID: groupID}}},
+				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: antigravityMixedSchedulingTestExtra(), AccountGroups: []AccountGroup{{GroupID: groupID}}},
 			},
 			accountsByID: map[int64]*Account{},
 		}
@@ -1545,7 +1644,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
-				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: antigravityMixedSchedulingTestExtra()},
 			},
 			accountsByID: map[int64]*Account{},
 		}
@@ -1773,7 +1872,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
 				{ID: 1, Platform: PlatformAnthropic, Priority: 1, Status: StatusActive, Schedulable: true},
-				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+				{ID: 2, Platform: PlatformAntigravity, Priority: 2, Status: StatusActive, Schedulable: true, Extra: antigravityMixedSchedulingTestExtra()},
 			},
 			accountsByID: map[int64]*Account{},
 		}
@@ -1907,7 +2006,7 @@ func TestGatewayService_selectAccountWithMixedScheduling(t *testing.T) {
 	t.Run("混合调度-仅有启用mixed_scheduling的antigravity账户", func(t *testing.T) {
 		repo := &mockAccountRepoForPlatform{
 			accounts: []Account{
-				{ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true, Extra: map[string]any{"mixed_scheduling": true}},
+				{ID: 1, Platform: PlatformAntigravity, Priority: 1, Status: StatusActive, Schedulable: true, Extra: antigravityMixedSchedulingTestExtra()},
 			},
 			accountsByID: map[int64]*Account{},
 		}

@@ -133,11 +133,7 @@ func resolveCreditsOveragesModelKey(ctx context.Context, account *Account, upstr
 	if account == nil {
 		return ""
 	}
-	modelKey = resolveFinalAntigravityModelKey(ctx, account, requestedModel)
-	if strings.TrimSpace(modelKey) != "" {
-		return modelKey
-	}
-	return resolveAntigravityModelKey(requestedModel)
+	return resolveFinalAntigravityModelKey(ctx, account, requestedModel)
 }
 
 // shouldMarkCreditsExhausted 判断一次 credits 请求失败是否应标记为 credits 耗尽。

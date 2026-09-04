@@ -1411,7 +1411,7 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 
 	// Collect unique models from all accounts
 	modelSet := make(map[string]struct{})
-	hasAnyMapping := false
+	hasAnyModels := false
 
 	for _, acc := range accounts {
 		// Passthrough routing accepts models independently of model_mapping. A stale
@@ -1425,17 +1425,29 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 			return nil
 		}
 
+		if acc.Platform == PlatformAntigravity {
+			models := acc.GetAntigravityAvailableModelIDs()
+			if len(models) > 0 {
+				hasAnyModels = true
+				for _, model := range models {
+					modelSet[model] = struct{}{}
+				}
+			}
+			continue
+		}
+
 		mapping := acc.GetModelMapping()
 		if len(mapping) > 0 {
-			hasAnyMapping = true
+			hasAnyModels = true
 			for model := range mapping {
 				modelSet[model] = struct{}{}
 			}
 		}
 	}
 
-	// If no account has model_mapping, return nil (use default)
-	if !hasAnyMapping {
+	// If no account has an explicit mapping or synced catalog, let the handler apply
+	// only provider-owned fallbacks; Antigravity intentionally has no static list.
+	if !hasAnyModels {
 		if s.modelsListCache != nil {
 			s.modelsListCache.Set(cacheKey, []string(nil), s.modelsListCacheTTL)
 			modelsListCacheStoreTotal.Add(1)
@@ -1480,7 +1492,7 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 	platforms := make(map[string]struct{})
 	for _, account := range accounts {
 		platform := strings.TrimSpace(account.Platform)
-		if !isConcreteRequestPlatform(platform) || !explicitModelMappingClaims(account, model) {
+		if !isConcreteRequestPlatform(platform) || !accountClaimsCompositeModel(account, model) {
 			continue
 		}
 		platforms[platform] = struct{}{}
@@ -1502,8 +1514,17 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 	return ownership, nil
 }
 
-func explicitModelMappingClaims(account Account, model string) bool {
-	if account.Credentials == nil || model == "" {
+func accountClaimsCompositeModel(account Account, model string) bool {
+	if strings.TrimSpace(model) == "" {
+		return false
+	}
+	// decision: Antigravity live catalog entries participate in composite ownership;
+	// not exact mappings only because the composite model list publishes the same catalog.
+	if account.Platform == PlatformAntigravity {
+		_, supported := account.ResolveAntigravityModel(model)
+		return supported
+	}
+	if account.Credentials == nil {
 		return false
 	}
 	mapped, ok := stringMappingFromRaw(account.Credentials["model_mapping"])[model]

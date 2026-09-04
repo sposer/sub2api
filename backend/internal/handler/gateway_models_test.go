@@ -89,22 +89,19 @@ func newGatewayModelsHandlerForTest(repo service.AccountRepository) *GatewayHand
 	}
 }
 
-func TestDefaultModelIDsForCompositeIncludesAntigravityDefaults(t *testing.T) {
-	antigravityIDs := defaultModelIDsForPlatform(service.PlatformAntigravity)
-	require.NotEmpty(t, antigravityIDs)
+func TestDefaultModelIDsForCompositeExcludeAntigravityStaticDefaults(t *testing.T) {
+	require.Empty(t, defaultModelIDsForPlatform(service.PlatformAntigravity))
 
 	compositeIDs := defaultModelIDsForPlatform(service.PlatformComposite)
-	require.Contains(t, compositeIDs, antigravityIDs[0])
+	require.NotContains(t, compositeIDs, "gemini-3.7-flash")
 }
 
-// Scenario: Anthropic defaults contain only Claude while Antigravity keeps its own Gemini models.
+// Scenario: Anthropic defaults remain provider-local while Antigravity has no static availability list.
 func TestDefaultModelIDsForAnthropicExcludeAntigravityGemini(t *testing.T) {
 	anthropicIDs := defaultModelIDsForPlatform(service.PlatformAnthropic)
 	require.Contains(t, anthropicIDs, "claude-opus-4-6")
 	require.NotContains(t, anthropicIDs, "gemini-2.5-flash")
-
-	antigravityIDs := defaultModelIDsForPlatform(service.PlatformAntigravity)
-	require.Contains(t, antigravityIDs, "gemini-2.5-flash")
+	require.Empty(t, defaultModelIDsForPlatform(service.PlatformAntigravity))
 }
 
 // Scenario: non-OpenAI groups return a Codex manifest instead of a standard model list.
@@ -514,11 +511,44 @@ func TestGatewayCodexModels_CompositeAnthropicDoesNotAdvertiseAntigravityDefault
 	require.NotContains(t, slugs, "gemini-2.5-flash")
 }
 
-// Scenario: Antigravity retains its own Claude and Gemini defaults inside Composite groups.
-func TestGatewayModels_CompositeAntigravityAdvertisesAntigravityDefaults(t *testing.T) {
+// Scenario: Composite groups aggregate Antigravity models from the account catalog.
+func TestGatewayModels_CompositeAntigravityUsesSyncedCatalog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	groupID := int64(65)
+	account := service.Account{ID: 1, Platform: service.PlatformAntigravity}
+	account.SetUpstreamModelCatalogSnapshot(service.UpstreamModelCatalogSnapshot{
+		Models: []string{"claude-canary", "gemini-9.9-flash-high", "gemini-9.9-flash-medium", "gemini-9.9-flash-low"},
+	})
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {account},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformComposite},
+	})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := modelIDsForTest(got.Data)
+	require.Contains(t, ids, "claude-canary")
+	require.Contains(t, ids, "gemini-9.9-flash")
+	require.Contains(t, ids, "gemini-9.9-flash-medium")
+	require.NotContains(t, ids, "gemini-3.7-flash")
+}
+
+func TestGatewayModels_CompositeAntigravityWithoutCatalogDoesNotUseCrossPlatformFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(68)
 	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
 		byGroup: map[int64][]service.Account{
 			groupID: {{ID: 1, Platform: service.PlatformAntigravity}},
@@ -537,9 +567,67 @@ func TestGatewayModels_CompositeAntigravityAdvertisesAntigravityDefaults(t *test
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got gatewayModelsResponseForTest
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Empty(t, got.Data)
+}
+
+func TestGatewayModels_AntigravityUsesSyncedCatalog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(66)
+	account := service.Account{ID: 1, Platform: service.PlatformAntigravity}
+	account.SetUpstreamModelCatalogSnapshot(service.UpstreamModelCatalogSnapshot{
+		Source: "upstream",
+		Models: []string{
+			"gemini-9.9-flash-high",
+			"gemini-9.9-flash-low",
+			"gemini-9.9-flash-medium",
+		},
+	})
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{groupID: {account}},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	ids := modelIDsForTest(got.Data)
-	require.Contains(t, ids, "claude-opus-4-6")
-	require.Contains(t, ids, "gemini-2.5-flash")
+	require.Contains(t, ids, "gemini-9.9-flash")
+	require.Contains(t, ids, "gemini-9.9-flash-medium")
+	require.NotContains(t, ids, "gemini-3.7-flash")
+}
+
+func TestGatewayModels_AntigravityWithoutCatalogDoesNotUseStaticFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(67)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {{ID: 1, Platform: service.PlatformAntigravity}},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		Group: &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+
+	h.Models(c)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Empty(t, got.Data)
 }
 
 func TestGatewayModels_CustomModelsListDisabledKeepsOriginalModels(t *testing.T) {

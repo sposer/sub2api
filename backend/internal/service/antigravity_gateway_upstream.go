@@ -41,6 +41,14 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		return nil, fmt.Errorf("missing model")
 	}
 	originalModel := claudeReq.Model
+	mappedModel := s.getMappedModel(account, originalModel)
+	if mappedModel == "" {
+		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
+		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", fmt.Sprintf("model %s not in whitelist", originalModel))
+	}
+	// decision: relay accounts rewrite through the shared account resolver; not raw
+	// passthrough because their explicit mapping or live catalog owns availability.
+	body = ReplaceModelInBody(body, mappedModel)
 
 	// 构建上游请求 URL
 	upstreamURL := baseURL + "/v1/messages"
@@ -101,7 +109,8 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		_, _ = c.Writer.Write(respBody)
 
 		return &ForwardResult{
-			Model: originalModel,
+			Model:         originalModel,
+			UpstreamModel: mappedModel,
 		}, nil
 	}
 
@@ -144,6 +153,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 
 	return &ForwardResult{
 		Model:                         originalModel,
+		UpstreamModel:                 mappedModel,
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 		Stream:                        claudeReq.Stream,

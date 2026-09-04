@@ -2533,7 +2533,7 @@ func summarizeSelectionFailureStats(stats selectionFailureStats) string {
 // 对于 Antigravity 平台，会先获取映射后的最终模型名（包括 thinking 后缀）再检查支持
 func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Context, account *Account, requestedModel string) bool {
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
-		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !accountClaimsCompositeModel(*account, publicModel) {
 			return false
 		}
 	}
@@ -2541,18 +2541,19 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
-		// 使用与转发阶段一致的映射逻辑：自定义映射优先 → 默认映射兜底
+		// 使用与转发阶段一致的显式映射或动态 catalog。
 		mapped := mapAntigravityModel(account, requestedModel)
 		if mapped == "" {
 			return false
 		}
-		// 应用 thinking 后缀后检查最终模型是否在账号映射中
+		// 应用 thinking 后缀后仍用同一 catalog/映射判定最终模型。
 		if enabled, ok := ThinkingEnabledFromContext(ctx); ok {
 			finalModel := applyThinkingModelSuffix(mapped, enabled)
 			if finalModel == mapped {
-				return true // thinking 后缀未改变模型名，映射已通过
+				return true
 			}
-			return account.IsModelSupported(finalModel)
+			_, supported := account.ResolveAntigravityModel(finalModel)
+			return supported
 		}
 		return true
 	}
@@ -2561,12 +2562,6 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 
 // isModelSupportedByAccount 根据账户平台检查模型支持（无 context，用于非 Antigravity 平台）
 func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedModel string) bool {
-	if account.Platform == PlatformAntigravity {
-		if strings.TrimSpace(requestedModel) == "" {
-			return true
-		}
-		return mapAntigravityModel(account, requestedModel) != ""
-	}
 	if account.IsBedrock() {
 		_, ok := ResolveBedrockModelID(account, requestedModel)
 		return ok

@@ -255,44 +255,20 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 	return true
 }
 
-// mapAntigravityModel 获取映射后的模型名
-// 完全依赖映射配置：账户映射（通配符）→ 默认映射兜底（DefaultAntigravityModelMapping）
-// 注意：返回空字符串表示模型不被支持，调度时会过滤掉该账号
+// mapAntigravityModel 获取映射后的模型名。显式账号 mapping 是限制；
+// 未配置时只接受最近同步的实时 catalog。
 func mapAntigravityModel(account *Account, requestedModel string) string {
 	if account == nil {
 		return ""
 	}
-	requestedModel = strings.TrimPrefix(requestedModel, "models/")
-
-	// 获取映射表（未配置时自动使用 DefaultAntigravityModelMapping）
-	mapping := account.GetModelMapping()
-	if len(mapping) == 0 {
-		return "" // 无映射配置（非 Antigravity 平台）
+	mappedModel, supported := account.ResolveAntigravityModel(requestedModel)
+	if !supported {
+		return ""
 	}
-
-	// 通过映射表查询（支持精确匹配 + 通配符）
-	mapped := account.GetMappedModel(requestedModel)
-
-	// 判断是否映射成功（mapped != requestedModel 说明找到了映射规则）
-	if mapped != requestedModel {
-		return mapped
-	}
-
-	// 如果 mapped == requestedModel，检查是否在映射表中配置（精确或通配符）
-	// 这区分两种情况：
-	// 1. 映射表中有 "model-a": "model-a"（显式透传）→ 返回 model-a
-	// 2. 通配符匹配 "claude-*": "claude-sonnet-4-5" 恰好目标等于请求名 → 返回 model-a
-	// 3. 映射表中没有 model-a 的配置 → 返回空（不支持）
-	if account.IsModelSupported(requestedModel) {
-		return requestedModel
-	}
-
-	// 未在映射表中配置的模型，返回空字符串（不支持）
-	return ""
+	return mappedModel
 }
 
 // getMappedModel 获取映射后的模型名
-// 完全依赖映射配置：账户映射（通配符）→ 默认映射兜底
 func (s *AntigravityGatewayService) getMappedModel(account *Account, requestedModel string) string {
 	return mapAntigravityModel(account, requestedModel)
 }
@@ -323,13 +299,6 @@ func applyThinkingModelSuffix(mappedModel string, thinkingEnabled bool) string {
 		return "claude-sonnet-4-5-thinking"
 	}
 	return mappedModel
-}
-
-// IsModelSupported 检查模型是否被支持
-// 所有 claude- 和 gemini- 前缀的模型都能通过映射或透传支持
-func (s *AntigravityGatewayService) IsModelSupported(requestedModel string) bool {
-	return strings.HasPrefix(requestedModel, "claude-") ||
-		strings.HasPrefix(requestedModel, "gemini-")
 }
 
 // TestConnectionResult 测试连接结果
@@ -363,9 +332,10 @@ func (s *AntigravityGatewayService) TestConnection(ctx context.Context, account 
 		return nil, fmt.Errorf("model %s not in whitelist", modelID)
 	}
 
-	// 构建请求体
+	// decision: choose the test protocol from the resolved upstream model; not the
+	// request alias because aliases may target a different model family.
 	var requestBody []byte
-	if strings.HasPrefix(modelID, "gemini-") {
+	if strings.HasPrefix(mappedModel, "gemini-") {
 		requestBody, err = s.buildGeminiTestRequest(projectID, mappedModel)
 	} else {
 		requestBody, err = s.buildClaudeTestRequest(projectID, mappedModel)
