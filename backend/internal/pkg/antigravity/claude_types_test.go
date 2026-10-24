@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,7 @@ func TestGeminiModelFromIDUsesCatalogID(t *testing.T) {
 	require.Equal(t, []string{"generateContent", "streamGenerateContent"}, model.SupportedGenerationMethods)
 }
 
-func TestIsGeminiReasoningModel_DerivesFutureFlashTiers(t *testing.T) {
+func TestIsGeminiReasoningModel(t *testing.T) {
 	t.Parallel()
 
 	for _, model := range []string{
@@ -51,10 +52,47 @@ func TestIsGeminiReasoningModel_DerivesFutureFlashTiers(t *testing.T) {
 		"gemini-9.9-flash-low",
 		"gemini-9.9-flash-tiered",
 		"models/gemini-9.9-flash-medium",
+		"gemini-3.1-pro-high",
+		"gemini-pro-agent",
+		"gemini-4-argon",
+		"gemini-4-argon-high",
+		"models/gemini-9.9-argon-medium",
 	} {
 		require.True(t, IsGeminiReasoningModel(model), model)
 	}
-	require.True(t, IsGeminiReasoningModel("gemini-3.1-pro-high"))
-	require.False(t, IsGeminiReasoningModel("gemini-9.9-flash"))
-	require.False(t, IsGeminiReasoningModel("gpt-oss-120b-medium"))
+	for _, model := range []string{"gemini-9.9-flash", "gemini-2.5-flash", "gpt-oss-120b-medium"} {
+		require.False(t, IsGeminiReasoningModel(model), model)
+	}
+}
+
+func TestClaudeContentItem_ThinkingAlwaysHasSignature(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		item ClaudeContentItem
+		want string
+	}{
+		{
+			name: "thinking with empty signature",
+			item: ClaudeContentItem{Type: "thinking", Thinking: "plan"},
+			want: `{"type":"thinking","thinking":"plan","signature":""}`,
+		},
+		{
+			name: "empty thinking",
+			item: ClaudeContentItem{Type: "thinking"},
+			want: `{"type":"thinking","thinking":"","signature":""}`,
+		},
+		{
+			name: "text without thinking fields",
+			item: ClaudeContentItem{Type: "text", Text: "hi"},
+			want: `{"type":"text","text":"hi"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.item)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.want, string(data))
+		})
+	}
 }

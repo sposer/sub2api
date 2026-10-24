@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -147,39 +148,6 @@ func TestAccountHandlerGetAvailableModels_GrokDefaultsToXAIModelsWithoutMapping(
 	}
 	require.Contains(t, ids, "grok-4.3")
 	require.Contains(t, ids, "grok-build-0.1")
-}
-
-func TestAccountHandlerGetAvailableModels_AntigravityPreservesExplicitRestriction(t *testing.T) {
-	svc := &availableModelsAdminService{
-		stubAdminService: newStubAdminService(),
-		account: service.Account{
-			ID:       47,
-			Name:     "antigravity-oauth",
-			Platform: service.PlatformAntigravity,
-			Type:     service.AccountTypeOAuth,
-			Status:   service.StatusActive,
-			Credentials: map[string]any{
-				"model_mapping": map[string]any{
-					"gemini-canary": "gemini-9.9-flash-high",
-				},
-			},
-		},
-	}
-	router := setupAvailableModelsRouter(svc)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/47/models", nil)
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var resp struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Data, 1)
-	require.Equal(t, "gemini-canary", resp.Data[0].ID)
 }
 
 func TestAccountHandlerGetAvailableModels_AntigravityUsesLiveCatalog(t *testing.T) {
@@ -404,6 +372,50 @@ func TestAccountHandlerGetAvailableModels_GeminiGoogleOneUsesConservativeCatalog
 	require.NotContains(t, ids, "gemini-2.5-flash-image")
 }
 
+func TestAccountHandlerGetAvailableModels_AntigravityPreservesExplicitRestriction(t *testing.T) {
+	known := antigravity.ClaudeModel{ID: "gemini-canary", Type: "model", DisplayName: "gemini-canary"}
+	custom := antigravity.ClaudeModel{ID: "claude-custom-alias", Type: "model", DisplayName: "claude-custom-alias"}
+	empty := []antigravity.ClaudeModel{}
+	cases := []struct {
+		name        string
+		credentials map[string]any
+		want        []antigravity.ClaudeModel
+	}{
+		{name: "nil credentials without catalog", want: empty},
+		{name: "missing mapping without catalog", credentials: map[string]any{}, want: empty},
+		{name: "empty JSON mapping without catalog", credentials: map[string]any{"model_mapping": map[string]any{}}, want: empty},
+		{name: "empty string mapping without catalog", credentials: map[string]any{"model_mapping": map[string]string{}}, want: empty},
+		{name: "blank key", credentials: map[string]any{"model_mapping": map[string]any{" ": "upstream-model"}}, want: empty},
+		{name: "wildcard-only mapping has no concrete test model", credentials: map[string]any{"model_mapping": map[string]any{"claude-*": "claude-sonnet-4-6", "gemini-3*": "gemini-3-flash"}}, want: empty},
+		{name: "JSON mapping exposes request-side names and skips wildcards", credentials: map[string]any{"model_mapping": map[string]any{
+			known.ID: "gemini-9.9-flash-high", custom.ID: "upstream-model", "claude-*": "claude-sonnet-4-6",
+		}}, want: []antigravity.ClaudeModel{custom, known}},
+		{name: "string mapping exposes request-side names and skips wildcards", credentials: map[string]any{"model_mapping": map[string]string{
+			known.ID: "gemini-9.9-flash-high", custom.ID: "upstream-model", "gemini-*": "gemini-3-flash",
+		}}, want: []antigravity.ClaudeModel{custom, known}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, accountType := range []string{service.AccountTypeOAuth, service.AccountTypeAPIKey} {
+				t.Run(accountType, func(t *testing.T) {
+					svc := &availableModelsAdminService{
+						stubAdminService: newStubAdminService(),
+						account:          service.Account{ID: 51, Platform: service.PlatformAntigravity, Type: accountType, Credentials: tc.credentials},
+					}
+					rec := httptest.NewRecorder()
+					setupAvailableModelsRouter(svc).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/51/models", nil))
+					require.Equal(t, http.StatusOK, rec.Code)
+					var resp struct {
+						Data []antigravity.ClaudeModel `json:"data"`
+					}
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+					require.Equal(t, tc.want, resp.Data)
+				})
+			}
+		})
+	}
+}
+
 func TestAccountHandlerSyncUpstreamModels_ConfigErrorReturnsBadRequest(t *testing.T) {
 	svc := &availableModelsAdminService{
 		stubAdminService: newStubAdminService(),
@@ -599,4 +611,37 @@ func TestAccountHandlerSyncUpstreamModels_MetadataEnrichmentFailureReturnsWarnin
 	require.Equal(t, []string{"x-preview-f-free"}, resp.Data.Models)
 	require.Len(t, resp.Data.Warnings, 1)
 	require.Equal(t, "upstream_model_metadata_incomplete", resp.Data.Warnings[0].Code)
+}
+
+func TestAccountHandlerGetAvailableModels_TypeSafeOnlyReturnsJev(t *testing.T) {
+	for _, credentials := range []map[string]any{
+		{"api_key": "ts-secret"},
+		{"api_key": "ts-secret", "model_mapping": map[string]any{"jev-latest": "jev-latest"}},
+	} {
+		svc := &availableModelsAdminService{
+			stubAdminService: newStubAdminService(),
+			account: service.Account{
+				ID:          46,
+				Name:        "typesafe",
+				Platform:    service.PlatformTypeSafe,
+				Type:        service.AccountTypeAPIKey,
+				Status:      service.StatusActive,
+				Credentials: credentials,
+			},
+		}
+		router := setupAvailableModelsRouter(svc)
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/46/models", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Data, 1)
+		require.Equal(t, "jev-latest", resp.Data[0].ID)
+	}
 }

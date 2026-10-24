@@ -122,6 +122,20 @@ type ClaudeContentItem struct {
 	Input any    `json:"input,omitempty"`
 }
 
+// MarshalJSON 保证 thinking 块始终带 thinking/signature 字段（即使为空），
+// 与 Anthropic 官方一致；Grok Build 等严格客户端缺少 signature 会解析失败。
+func (c ClaudeContentItem) MarshalJSON() ([]byte, error) {
+	type claudeContentItem ClaudeContentItem
+	if c.Type != "thinking" {
+		return json.Marshal(claudeContentItem(c))
+	}
+	return json.Marshal(struct {
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		claudeContentItem
+	}{Thinking: c.Thinking, Signature: c.Signature, claudeContentItem: claudeContentItem(c)})
+}
+
 // ClaudeUsage Claude 用量统计
 type ClaudeUsage struct {
 	InputTokens              int `json:"input_tokens"`
@@ -222,10 +236,14 @@ var legacyGeminiReasoningModels = []string{
 	"gemini-3-pro-preview",
 }
 
-// IsGeminiReasoningModel 判断是否为不支持参数和强制 ToolConfig 的 Gemini 推理模型。
-// 这里的旧模型是协议差异，不承担模型可用性声明；新版 Flash tier 按命名规则识别。
+// IsGeminiReasoningModel 判断是否为不支持采样参数的 Gemini 推理模型。
+// 这里的旧模型是协议差异，不承担模型可用性声明；Flash tier 和 Argon 按命名规则识别。
 func IsGeminiReasoningModel(modelID string) bool {
 	lowerID := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(modelID), "models/"))
+	if strings.Contains(lowerID, "gemini-pro-agent") ||
+		(strings.HasPrefix(lowerID, "gemini-") && strings.Contains(lowerID, "-argon")) {
+		return true
+	}
 	if strings.Contains(lowerID, "-flash-") {
 		for _, tier := range []string{"-high", "-medium", "-low", "-tiered"} {
 			if strings.HasSuffix(lowerID, tier) {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,20 +26,27 @@ const (
 	UpstreamModelCatalogExtraKey                    = "upstream_model_catalog"
 	UpstreamModelMetadataExtraKey                   = "upstream_model_metadata"
 	UpstreamModelMetadataIncompleteCode             = "upstream_model_metadata_incomplete"
+	UpstreamModelMetadataPartialCode                = "upstream_model_metadata_partial"
 	UpstreamModelAvailabilitySourceLive             = "live"
 	UpstreamModelAvailabilitySourceConfigured       = "configured"
+
+	vertexPublisherModelsPageSize    = 300
+	vertexPublisherModelsMaxPages    = 20
+	vertexGooglePublisherModelPrefix = "publishers/google/models/"
 )
 
 type UpstreamModelMetadata struct {
-	ID                       string   `json:"id"`
-	DisplayName              string   `json:"display_name,omitempty"`
-	Description              string   `json:"description,omitempty"`
-	Reasoning                *bool    `json:"reasoning,omitempty"`
-	DefaultReasoningLevel    string   `json:"default_reasoning_level,omitempty"`
-	SupportedReasoningLevels []string `json:"supported_reasoning_levels,omitempty"`
-	InputModalities          []string `json:"input_modalities,omitempty"`
-	ContextWindow            int64    `json:"context_window,omitempty"`
-	MaxOutputTokens          int64    `json:"max_output_tokens,omitempty"`
+	ID                       string                     `json:"id"`
+	DisplayName              string                     `json:"display_name,omitempty"`
+	Description              string                     `json:"description,omitempty"`
+	Reasoning                *bool                      `json:"reasoning,omitempty"`
+	DefaultReasoningLevel    string                     `json:"default_reasoning_level,omitempty"`
+	SupportedReasoningLevels []string                   `json:"supported_reasoning_levels,omitempty"`
+	InputModalities          []string                   `json:"input_modalities,omitempty"`
+	ContextWindow            int64                      `json:"context_window,omitempty"`
+	MaxContextWindow         int64                      `json:"max_context_window,omitempty"`
+	MaxOutputTokens          int64                      `json:"max_output_tokens,omitempty"`
+	CodexToolCapabilities    map[string]json.RawMessage `json:"codex_tool_capabilities,omitempty"`
 }
 
 type UpstreamModelCatalogSnapshot struct {
@@ -246,8 +254,10 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 	return models, err
 }
 
-// SyncUpstreamModelCatalog fetches the account's model list, persists the IDs,
-// and enriches complete capability metadata when the upstream exposes it.
+// SyncUpstreamModelCatalog persists a successful live availability list and
+// enriches complete capability metadata per model. Configured fallback IDs do
+// not become implicit availability, and incomplete metadata preserves the last
+// complete snapshot for models still listed or explicitly mapped.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
 	models, body, err := s.fetchUpstreamModelList(ctx, account)
 	availabilitySource := UpstreamModelAvailabilitySourceLive
@@ -279,9 +289,18 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		}
 	}
 
+	// Capability enrichment also covers concrete model_mapping targets. Admins may
+	// whitelist models that the live /models list omitted; those still need registry
+	// metadata so Codex catalogs can advertise reasoning and modalities.
+	enrichIDs := dedupeAndSortModelIDs(append(append([]string{}, models...), configuredUpstreamModelsForCapabilitySync(account)...))
+	// Dedicated image/video generators are not Codex agent catalog entries and often
+	// omit context windows in public registries. Keep them out of completeness checks
+	// so they do not mask successful agent-model capability sync.
+	capabilityIDs := capabilitySyncModelIDs(enrichIDs)
+
 	metadataSource := "upstream"
-	if upstreamCatalogNeedsRegistry(models, catalog.Metadata) {
-		if registryMetadata, registryErr := s.fetchModelsDevMetadata(ctx, account, models); registryErr == nil {
+	if upstreamCatalogNeedsRegistry(capabilityIDs, catalog.Metadata) {
+		if registryMetadata, registryErr := s.fetchModelsDevMetadata(ctx, account, enrichIDs); registryErr == nil {
 			for modelID, fallback := range registryMetadata {
 				current := catalog.Metadata[modelID]
 				merged, changed := mergeUpstreamModelMetadata(current, fallback)
@@ -299,51 +318,90 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		}
 	}
 
-	metadataComplete := !upstreamCatalogNeedsRegistry(models, catalog.Metadata)
-	if !metadataComplete {
-		catalog.Warnings = append(catalog.Warnings, UpstreamModelSyncWarning{
-			Code:    UpstreamModelMetadataIncompleteCode,
-			Message: "Model IDs were synced, but capability metadata is incomplete.",
-		})
-	}
-	if account == nil || account.ID <= 0 || s.accountRepo == nil {
-		return catalog, nil
+	completeMetadata := completeUpstreamModelMetadataSubset(capabilityIDs, catalog.Metadata)
+	persistedCapabilities := false
+	if account != nil && account.ID > 0 && s.accountRepo != nil {
+		syncedAt := time.Now().UTC().Format(time.RFC3339)
+		// decision: persist availability and capabilities in one account update;
+		// not independent writes because a failed sync must not leave split snapshots.
+		updates := make(map[string]any, 2)
+		var catalogSnapshot *UpstreamModelCatalogSnapshot
+		// decision: only a successful live list can become implicit availability; not
+		// configured fallback IDs because removing the explicit mapping must remove access.
+		if availabilitySource == UpstreamModelAvailabilitySourceLive {
+			catalogSnapshot = &UpstreamModelCatalogSnapshot{Source: "upstream", SyncedAt: syncedAt, Models: models}
+			updates[UpstreamModelCatalogExtraKey] = *catalogSnapshot
+		}
+		var metadataSnapshot *UpstreamModelMetadataSnapshot
+		if len(completeMetadata) > 0 {
+			// Retain known metadata only for models still listed or explicitly mapped.
+			if previous := account.GetUpstreamModelMetadataSnapshot(); previous != nil {
+				retainedModels := capabilityIDs
+				if availabilitySource != UpstreamModelAvailabilitySourceLive {
+					retainedModels = append([]string(nil), capabilityIDs...)
+					for modelID := range previous.Models {
+						retainedModels = append(retainedModels, modelID)
+					}
+				}
+				for _, modelID := range retainedModels {
+					old, exists := previous.Models[modelID]
+					if !exists {
+						continue
+					}
+					if entry, ok := completeMetadata[modelID]; ok {
+						if entry.CodexToolCapabilities == nil {
+							entry.CodexToolCapabilities = make(map[string]json.RawMessage)
+						}
+						applyCodexToolCapabilities(entry.CodexToolCapabilities, old.CodexToolCapabilities, false)
+						completeMetadata[modelID] = entry
+					} else {
+						completeMetadata[modelID] = old
+					}
+				}
+			}
+			metadataSnapshot = &UpstreamModelMetadataSnapshot{
+				Source:   metadataSource,
+				SyncedAt: syncedAt,
+				Models:   completeMetadata,
+			}
+			updates[UpstreamModelMetadataExtraKey] = *metadataSnapshot
+		}
+		if len(updates) > 0 {
+			if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+				return nil, newUpstreamModelSyncInternalError("Failed to save upstream model data", err)
+			}
+			if catalogSnapshot != nil {
+				account.SetUpstreamModelCatalogSnapshot(*catalogSnapshot)
+				if s.modelsCacheInvalidator != nil {
+					platform := account.Platform
+					if platform == PlatformAntigravity {
+						// decision: clear all views; not add account-dependency rules to the
+						// exact-dimension invalidator. Mixed and unfiltered views share this
+						// catalog; revisit when sync-driven cache churn warrants tracking.
+						platform = ""
+					}
+					s.modelsCacheInvalidator.InvalidateAvailableModelsCache(nil, platform)
+				}
+			}
+			if metadataSnapshot != nil {
+				account.SetUpstreamModelMetadataSnapshot(*metadataSnapshot)
+				persistedCapabilities = true
+			}
+		}
 	}
 
-	syncedAt := time.Now().UTC().Format(time.RFC3339)
-	updates := make(map[string]any, 2)
-	var catalogSnapshot *UpstreamModelCatalogSnapshot
-	// decision: only a successful live list can become implicit availability; not
-	// configured fallback IDs because removing the explicit mapping must remove access.
-	if availabilitySource == UpstreamModelAvailabilitySourceLive {
-		catalogSnapshot = &UpstreamModelCatalogSnapshot{Source: "upstream", SyncedAt: syncedAt, Models: models}
-		updates[UpstreamModelCatalogExtraKey] = *catalogSnapshot
-	}
-	var metadataSnapshot *UpstreamModelMetadataSnapshot
-	if metadataComplete && len(catalog.Metadata) > 0 {
-		metadataSnapshot = &UpstreamModelMetadataSnapshot{
-			Source:   metadataSource,
-			SyncedAt: syncedAt,
-			Models:   catalog.Metadata,
+	if upstreamCatalogNeedsRegistry(capabilityIDs, catalog.Metadata) {
+		if persistedCapabilities {
+			catalog.Warnings = append(catalog.Warnings, UpstreamModelSyncWarning{
+				Code:    UpstreamModelMetadataPartialCode,
+				Message: "Some model capabilities were saved; remaining models are still incomplete.",
+			})
+		} else {
+			catalog.Warnings = append(catalog.Warnings, UpstreamModelSyncWarning{
+				Code:    UpstreamModelMetadataIncompleteCode,
+				Message: "Model IDs were synced, but capability metadata is incomplete.",
+			})
 		}
-		updates[UpstreamModelMetadataExtraKey] = *metadataSnapshot
-	}
-	if len(updates) == 0 {
-		return catalog, nil
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
-		return nil, newUpstreamModelSyncInternalError("Failed to save upstream model data", err)
-	}
-	if catalogSnapshot != nil {
-		account.SetUpstreamModelCatalogSnapshot(*catalogSnapshot)
-		// decision: invalidate every cached group view for this platform; not one group
-		// because an account may contribute its catalog to multiple groups.
-		if s.modelsCacheInvalidator != nil {
-			s.modelsCacheInvalidator.InvalidateAvailableModelsCache(nil, account.Platform)
-		}
-	}
-	if metadataSnapshot != nil {
-		account.SetUpstreamModelMetadataSnapshot(*metadataSnapshot)
 	}
 	return catalog, nil
 }
@@ -376,6 +434,18 @@ func configuredUpstreamModelsForCapabilitySync(account *Account) []string {
 	return dedupeAndSortModelIDs(models)
 }
 
+func capabilitySyncModelIDs(modelIDs []string) []string {
+	filtered := make([]string, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" || isCodexDedicatedMediaModel(modelID) {
+			continue
+		}
+		filtered = append(filtered, modelID)
+	}
+	return filtered
+}
+
 func upstreamModelSyncAccountID(account *Account) int64 {
 	if account == nil {
 		return 0
@@ -394,13 +464,7 @@ func upstreamCatalogNeedsRegistry(models []string, metadata map[string]UpstreamM
 	for _, modelID := range models {
 		modelID = strings.TrimSpace(modelID)
 		model, ok := metadata[modelID]
-		if !ok || !upstreamModelMetadataIsUseful(model) {
-			return true
-		}
-		if model.Reasoning == nil || len(model.InputModalities) == 0 || model.ContextWindow <= 0 {
-			return true
-		}
-		if *model.Reasoning && len(model.SupportedReasoningLevels) == 0 {
+		if !ok || !upstreamModelMetadataIsComplete(model) {
 			return true
 		}
 	}
@@ -413,8 +477,56 @@ func upstreamModelMetadataIsUseful(metadata UpstreamModelMetadata) bool {
 		metadata.Reasoning != nil ||
 		len(metadata.SupportedReasoningLevels) > 0 ||
 		len(metadata.InputModalities) > 0 ||
+		len(metadata.CodexToolCapabilities) > 0 ||
 		metadata.ContextWindow > 0 ||
+		metadata.MaxContextWindow > 0 ||
 		metadata.MaxOutputTokens > 0
+}
+
+// upstreamModelMetadataIsComplete reports whether a snapshot entry is safe to
+// persist and later prefer over local Codex name-based fallbacks.
+func upstreamModelMetadataIsComplete(metadata UpstreamModelMetadata) bool {
+	if metadata.Reasoning == nil {
+		return false
+	}
+	if len(normalizeCodexInputModalities(metadata.InputModalities)) == 0 {
+		return false
+	}
+	if metadata.ContextWindow <= 0 {
+		return false
+	}
+	if *metadata.Reasoning && len(normalizeReasoningLevels(metadata.SupportedReasoningLevels)) == 0 {
+		return false
+	}
+	return true
+}
+
+func completeUpstreamModelMetadataSubset(
+	modelIDs []string,
+	metadata map[string]UpstreamModelMetadata,
+) map[string]UpstreamModelMetadata {
+	if len(metadata) == 0 {
+		return nil
+	}
+	complete := make(map[string]UpstreamModelMetadata)
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			continue
+		}
+		entry, ok := metadata[modelID]
+		if !ok || !upstreamModelMetadataIsComplete(entry) {
+			continue
+		}
+		if strings.TrimSpace(entry.ID) == "" {
+			entry.ID = modelID
+		}
+		complete[modelID] = entry
+	}
+	if len(complete) == 0 {
+		return nil
+	}
+	return complete
 }
 
 func mergeUpstreamModelMetadata(primary, fallback UpstreamModelMetadata) (UpstreamModelMetadata, bool) {
@@ -451,6 +563,11 @@ func mergeUpstreamModelMetadata(primary, fallback UpstreamModelMetadata) (Upstre
 	}
 	if merged.ContextWindow <= 0 && fallback.ContextWindow > 0 {
 		merged.ContextWindow = fallback.ContextWindow
+		// Keep the registry's context limits together. A direct upstream default
+		// without an explicit maximum remains the conservative ceiling.
+		if merged.MaxContextWindow <= 0 {
+			merged.MaxContextWindow = fallback.MaxContextWindow
+		}
 		changed = true
 	}
 	if merged.MaxOutputTokens <= 0 && fallback.MaxOutputTokens > 0 {
@@ -561,6 +678,7 @@ func upstreamMetadataFromModelsDevModel(modelID string, model modelsDevModel) Up
 		SupportedReasoningLevels: levels,
 		InputModalities:          normalizeCodexInputModalities(model.Modalities.Input),
 		ContextWindow:            model.Limit.Context,
+		MaxContextWindow:         model.Limit.Context,
 		MaxOutputTokens:          model.Limit.Output,
 	}
 	if len(levels) > 0 {
@@ -596,7 +714,7 @@ func upstreamModelRegistryBaseURL(account *Account) string {
 		return ""
 	}
 	switch {
-	case account.IsOpenAI() || account.IsCNProvider():
+	case account.IsOpenAI() || account.IsMultiProtocolAPIKey():
 		return account.GetOpenAIFormatBaseURL()
 	case account.IsGrok():
 		return account.GetGrokBaseURL()
@@ -612,6 +730,13 @@ func upstreamModelRegistryBaseURL(account *Account) string {
 }
 
 func matchModelsDevProvider(registry map[string]modelsDevProvider, accountBaseURL string) (modelsDevProvider, bool) {
+	if provider, ok := matchModelsDevProviderByAPIURL(registry, accountBaseURL); ok {
+		return provider, true
+	}
+	return matchModelsDevProviderByKnownHost(registry, accountBaseURL)
+}
+
+func matchModelsDevProviderByAPIURL(registry map[string]modelsDevProvider, accountBaseURL string) (modelsDevProvider, bool) {
 	accountBaseURL = normalizeModelRegistryBaseURL(accountBaseURL)
 	if accountBaseURL == "" {
 		return modelsDevProvider{}, false
@@ -634,6 +759,46 @@ func matchModelsDevProvider(registry map[string]modelsDevProvider, accountBaseUR
 		}
 	}
 	return best, bestScore >= 0
+}
+
+// matchModelsDevProviderByKnownHost covers first-party hosts whose models.dev
+// entries omit the `api` field (notably the official OpenAI provider). Custom
+// compatible gateways must still match by API URL so same-named models are not
+// cross-attributed across vendors.
+func matchModelsDevProviderByKnownHost(registry map[string]modelsDevProvider, accountBaseURL string) (modelsDevProvider, bool) {
+	host := modelRegistryHostname(accountBaseURL)
+	if host == "" {
+		return modelsDevProvider{}, false
+	}
+	providerID := ""
+	switch host {
+	case "api.openai.com", "chatgpt.com":
+		providerID = "openai"
+	case "opencode.ai":
+		providerID = "opencode-go"
+	default:
+		return modelsDevProvider{}, false
+	}
+	provider, ok := registry[providerID]
+	if !ok || len(provider.Models) == 0 {
+		return modelsDevProvider{}, false
+	}
+	if strings.TrimSpace(provider.ID) == "" {
+		provider.ID = providerID
+	}
+	return provider, true
+}
+
+func modelRegistryHostname(raw string) string {
+	normalized := normalizeModelRegistryBaseURL(raw)
+	if normalized == "" {
+		return ""
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 }
 
 func normalizeModelRegistryBaseURL(raw string) string {
@@ -659,12 +824,16 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	if account.Platform == PlatformAntigravity &&
 		account.Type != AccountTypeAPIKey &&
 		account.Type != AccountTypeUpstream {
-		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
-		return models, nil, err
+		return s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 	}
 
 	if s.httpUpstream == nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
+	}
+
+	if account.IsGemini() && account.IsVertexServiceAccount() {
+		models, err := s.fetchVertexGeminiUpstreamModels(ctx, account)
+		return models, nil, err
 	}
 
 	req, err := s.buildUpstreamModelsRequest(ctx, account)
@@ -672,29 +841,9 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return nil, nil, err
 	}
 
-	proxyURL := upstreamModelsProxyURL(account)
-	resp, err := s.doUpstreamModelsRequest(req, proxyURL, account)
+	body, err := s.readUpstreamModelsResponse(req, account)
 	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	bodyLimit := resolveModelsListReadLimit(s.cfg)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
-	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream model list", err)
-	}
-	if int64(len(body)) > bodyLimit {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
-	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, nil, &UpstreamModelSyncError{
-			Kind:       UpstreamModelSyncErrorUpstream,
-			Message:    fmt.Sprintf("Upstream model list request failed with HTTP %d", resp.StatusCode),
-			StatusCode: resp.StatusCode,
-			Err:        fmt.Errorf("upstream model list returned HTTP %d", resp.StatusCode),
-		}
+		return nil, nil, err
 	}
 
 	extractModels := extractUpstreamModelIDs
@@ -712,14 +861,136 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	return models, body, nil
 }
 
+// readUpstreamModelsResponse 发送模型列表请求并读取受限大小的响应体；非 2xx 返回带状态码的同步错误。
+func (s *AccountTestService) readUpstreamModelsResponse(req *http.Request, account *Account) ([]byte, error) {
+	resp, err := s.doUpstreamModelsRequest(req, upstreamModelsProxyURL(account), account)
+	if err != nil {
+		return nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	bodyLimit := resolveModelsListReadLimit(s.cfg)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
+	if err != nil {
+		return nil, newUpstreamModelSyncUpstreamError("Failed to read upstream model list", err)
+	}
+	if int64(len(body)) > bodyLimit {
+		return nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, &UpstreamModelSyncError{
+			Kind:       UpstreamModelSyncErrorUpstream,
+			Message:    fmt.Sprintf("Upstream model list request failed with HTTP %d", resp.StatusCode),
+			StatusCode: resp.StatusCode,
+			Err:        fmt.Errorf("upstream model list returned HTTP %d", resp.StatusCode),
+		}
+	}
+	return body, nil
+}
+
+// fetchVertexGeminiUpstreamModels 按账号默认区域读取 Vertex 上可用的 Gemini 模型。列表接口不接受 API Key。
+func (s *AccountTestService) fetchVertexGeminiUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+	if account.IsVertexAPIKey() {
+		return nil, newUpstreamModelSyncUnsupportedError("Vertex API key accounts do not support upstream model listing", nil)
+	}
+	if _, err := parseVertexServiceAccountKey(account); err != nil {
+		return nil, newUpstreamModelSyncConfigError("Invalid Vertex service account credentials", err)
+	}
+	location := account.VertexLocation("")
+	if _, err := buildVertexPublisherModelsURL(location, ""); err != nil {
+		return nil, newUpstreamModelSyncConfigError("Invalid Vertex location", err)
+	}
+	if s.geminiTokenProvider == nil {
+		return nil, newUpstreamModelSyncConfigError("Gemini token provider is not configured", nil)
+	}
+	accessToken, err := s.geminiTokenProvider.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, newUpstreamModelSyncUpstreamError("Failed to get Vertex access token", err)
+	}
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return nil, newUpstreamModelSyncConfigError("No Vertex access token is available", nil)
+	}
+
+	return listVertexGeminiPublisherModels(location, func(page int, listURL string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+		if err != nil {
+			return nil, newUpstreamModelSyncConfigError("Invalid Vertex model list URL", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+
+		body, err := s.readUpstreamModelsResponse(req, account)
+		if err != nil {
+			// 只有首页的 404/405 表示列表端点不可用；翻页途中的失败不触发配置模型回退。
+			var syncErr *UpstreamModelSyncError
+			if page > 0 && errors.As(err, &syncErr) {
+				syncErr.StatusCode = 0
+			}
+			return nil, err
+		}
+		return body, nil
+	})
+}
+
+// listVertexGeminiPublisherModels 按区域分页读取 Google 发布方模型列表，只保留 gemini- 前缀的模型（去重排序）。
+// 区域端点还会列出 Gemma、Veo、AutoML 等非 Gemini 的模型花园条目；global 端点只含 Gemini。
+// fetchPage 负责发送请求并处理非 2xx 响应，返回该页的响应体；它返回的错误原样透出。
+func listVertexGeminiPublisherModels(location string, fetchPage func(page int, listURL string) ([]byte, error)) ([]string, error) {
+	models := make([]string, 0)
+	pageToken := ""
+	for page := 0; page < vertexPublisherModelsMaxPages; page++ {
+		listURL, err := buildVertexPublisherModelsURL(location, pageToken)
+		if err != nil {
+			return nil, newUpstreamModelSyncConfigError("Invalid Vertex location", err)
+		}
+		body, err := fetchPage(page, listURL)
+		if err != nil {
+			return nil, err
+		}
+		var response struct {
+			PublisherModels []struct {
+				Name string `json:"name"`
+			} `json:"publisherModels"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, newUpstreamModelSyncUpstreamError("Upstream model list response was not valid JSON", err)
+		}
+		for _, entry := range response.PublisherModels {
+			name := strings.TrimSpace(entry.Name)
+			if !strings.HasPrefix(name, vertexGooglePublisherModelPrefix) {
+				continue
+			}
+			modelID := strings.TrimPrefix(name, vertexGooglePublisherModelPrefix)
+			if strings.HasPrefix(modelID, "gemini-") && len(modelID) > len("gemini-") {
+				models = append(models, modelID)
+			}
+		}
+
+		pageToken = strings.TrimSpace(response.NextPageToken)
+		if pageToken == "" {
+			if len(models) == 0 {
+				return nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+			}
+			return dedupeAndSortModelIDs(models), nil
+		}
+	}
+	return nil, newUpstreamModelSyncUpstreamError(
+		"Upstream model list pagination did not finish",
+		fmt.Errorf("more than %d pages", vertexPublisherModelsMaxPages),
+	)
+}
+
 func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
 	switch {
 	case account.Platform == PlatformAntigravity:
 		return s.buildAntigravityRelayModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
-	case account.IsOpenAI() || account.IsCNProvider():
-		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）复用 OpenAI /v1/models 探测。
+	case account.IsOpenAI() || account.IsMultiProtocolAPIKey():
+		// 多协议 API Key 供应商（国产厂商与聚合平台）复用 OpenAI /v1/models 探测。
 		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)
@@ -867,7 +1138,7 @@ func (s *AccountTestService) buildAnthropicUpstreamModelsRequest(ctx context.Con
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid Anthropic model list URL", err)
 	}
-	for key, value := range claude.DefaultHeaders {
+	for key, value := range claude.DefaultHeaders() {
 		req.Header.Set(key, value)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -876,7 +1147,9 @@ func (s *AccountTestService) buildAnthropicUpstreamModelsRequest(ctx context.Con
 	if authHeaderName != "" {
 		req.Header.Set(authHeaderName, authHeaderValue)
 	} else {
-		setAnthropicAPIKeyAuthHeader(req.Header, account, apiKeyAuthToken)
+		// Ollama Cloud Anthropic 兼容端点按实际 base_url 强制 Bearer，其余保持
+		// extra/default 行为。
+		setAnthropicAPIKeyAuthHeader(req.Header, account, apiKeyAuthToken, normalizedBaseURL)
 	}
 	// 账号级请求头覆写：模型列表探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
@@ -913,7 +1186,7 @@ func (s *AccountTestService) buildAntigravityRelayModelsRequest(ctx context.Cont
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid Antigravity model list URL", err)
 	}
-	for key, value := range claude.DefaultHeaders {
+	for key, value := range claude.DefaultHeaders() {
 		req.Header.Set(key, value)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -929,6 +1202,12 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 	if account.IsOpenAIOAuth() {
 		return s.buildOpenAIOAuthUpstreamModelsRequest(ctx, account)
 	}
+	return buildOpenAIAPIKeyModelsRequest(ctx, account, s.validateUpstreamBaseURL)
+}
+
+// buildOpenAIAPIKeyModelsRequest is shared by admin discovery and public model
+// listing. Codex content negotiation is intentionally absent from this request.
+func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, validateBaseURL func(string) (string, error)) (*http.Request, error) {
 	if account.Type != AccountTypeAPIKey {
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported OpenAI account type for upstream model sync: %s", account.Type), nil,
@@ -945,7 +1224,7 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://api.openai.com"
 	}
-	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+	normalizedBaseURL, err := validateBaseURL(baseURL)
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid OpenAI base URL", err)
 	}
@@ -1071,43 +1350,47 @@ func (s *AccountTestService) buildGeminiUpstreamModelsRequest(ctx context.Contex
 	return req, nil
 }
 
-func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, []byte, error) {
 	if s.antigravityGatewayService == nil || s.antigravityGatewayService.GetTokenProvider() == nil {
-		return nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
+		return nil, nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
 	}
 
 	accessToken, err := s.antigravityGatewayService.GetTokenProvider().GetAccessToken(ctx, account)
 	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to get Antigravity access token", err)
 	}
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
-		return nil, newUpstreamModelSyncConfigError("No Antigravity access token is available", nil)
+		return nil, nil, newUpstreamModelSyncConfigError("No Antigravity access token is available", nil)
 	}
 
 	client, err := antigravity.NewClient(upstreamModelsProxyURL(account))
 	if err != nil {
-		return nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
+		return nil, nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
 	}
-	modelsResp, _, err := client.FetchAvailableModels(
+	modelsResp, raw, err := client.FetchAvailableModelsFromURL(
 		ctx,
-		[]string{resolveAntigravityForwardBaseURL(account)},
+		resolveAntigravityForwardBaseURL(account),
 		accessToken,
 		strings.TrimSpace(account.GetCredential("project_id")),
 		resolveModelsListReadLimit(s.cfg),
 	)
 	if err != nil {
-		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch Antigravity available models", err)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to fetch Antigravity available models", err)
 	}
 	if modelsResp == nil {
-		return nil, newUpstreamModelSyncUpstreamError("Upstream returned no model catalog", nil)
+		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no model catalog", nil)
 	}
 
 	models := make([]string, 0, len(modelsResp.Models))
 	for modelID := range modelsResp.Models {
 		models = append(models, strings.TrimSpace(modelID))
 	}
-	return dedupeAndSortModelIDs(models), nil
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read Antigravity model metadata", err)
+	}
+	return dedupeAndSortModelIDs(models), body, nil
 }
 
 func (s *AccountTestService) doUpstreamModelsRequest(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {
@@ -1137,6 +1420,26 @@ func buildV1ModelsURL(base string) string {
 
 func buildOpenAIModelsURL(base string) string {
 	return buildOpenAIEndpointURL(base, "/v1/models")
+}
+
+// buildVertexPublisherModelsURL 构造 Google 发布方模型列表地址。该接口只有 v1beta1 版本，pageSize 上限 300。
+func buildVertexPublisherModelsURL(location, pageToken string) (string, error) {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		location = vertexDefaultLocation
+	}
+	if !vertexLocationPattern.MatchString(location) {
+		return "", fmt.Errorf("invalid vertex location: %s", location)
+	}
+	host := location + "-aiplatform.googleapis.com"
+	if location == "global" {
+		host = vertexGlobalHost
+	}
+	query := url.Values{"pageSize": []string{strconv.Itoa(vertexPublisherModelsPageSize)}}
+	if pageToken != "" {
+		query.Set("pageToken", pageToken)
+	}
+	return fmt.Sprintf("https://%s/v1beta1/publishers/google/models?%s", host, query.Encode()), nil
 }
 
 func buildGeminiModelsURL(base string) string {
@@ -1183,6 +1486,12 @@ type upstreamModelCapabilityEntry struct {
 	MaxContextWindow         int64                      `json:"max_context_window"`
 	MaxOutputTokens          int64                      `json:"max_output_tokens"`
 	Limit                    modelsDevLimit             `json:"limit"`
+	DisplayNameCamel         string                     `json:"displayName"`
+	SupportsImages           *bool                      `json:"supportsImages"`
+	SupportsThinking         *bool                      `json:"supportsThinking"`
+	ThinkingBudget           *int64                     `json:"thinkingBudget"`
+	MaxTokens                int64                      `json:"maxTokens"`
+	MaxOutputTokensCamel     int64                      `json:"maxOutputTokens"`
 }
 
 func extractUpstreamModelIDs(body []byte) ([]string, error) {
@@ -1216,6 +1525,11 @@ func extractUpstreamModelCatalog(body []byte, grok bool) ([]string, map[string]U
 		}
 		models = append(models, modelID)
 		entry := upstreamMetadataFromCapabilityEntry(modelID, capability)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err == nil {
+			entry.CodexToolCapabilities = make(map[string]json.RawMessage)
+			applyCodexToolCapabilities(entry.CodexToolCapabilities, fields, true)
+		}
 		if upstreamModelMetadataIsUseful(entry) {
 			metadata[modelID] = entry
 		}
@@ -1226,12 +1540,33 @@ func extractUpstreamModelCatalog(body []byte, grok bool) ([]string, map[string]U
 func extractUpstreamModelRawEntries(body []byte) ([]json.RawMessage, error) {
 	var response struct {
 		Data   []json.RawMessage `json:"data"`
-		Models []json.RawMessage `json:"models"`
+		Models json.RawMessage   `json:"models"`
 	}
 	if err := json.Unmarshal(body, &response); err == nil && (response.Data != nil || response.Models != nil) {
-		entries := make([]json.RawMessage, 0, len(response.Data)+len(response.Models))
-		entries = append(entries, response.Data...)
-		entries = append(entries, response.Models...)
+		entries := append([]json.RawMessage{}, response.Data...)
+		if len(response.Models) > 0 && string(response.Models) != "null" {
+			var list []json.RawMessage
+			if err := json.Unmarshal(response.Models, &list); err == nil {
+				entries = append(entries, list...)
+			} else {
+				// Antigravity keys its model catalog by the exact generation model ID.
+				var models map[string]map[string]json.RawMessage
+				if err := json.Unmarshal(response.Models, &models); err != nil {
+					return nil, fmt.Errorf("parse upstream model catalog: %w", err)
+				}
+				for modelID, fields := range models {
+					if fields == nil {
+						fields = make(map[string]json.RawMessage)
+					}
+					fields["id"], _ = json.Marshal(modelID)
+					raw, err := json.Marshal(fields)
+					if err != nil {
+						return nil, fmt.Errorf("parse upstream model metadata: %w", err)
+					}
+					entries = append(entries, raw)
+				}
+			}
+		}
 		return entries, nil
 	}
 	var entries []json.RawMessage
@@ -1247,6 +1582,34 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 		levels = reasoningLevelsFromModelsDevOptions(entry.ReasoningOptions)
 	}
 	reasoning := entry.Reasoning
+	if reasoning == nil {
+		reasoning = entry.SupportsThinking
+	}
+	if len(levels) == 0 && entry.SupportsThinking != nil && *entry.SupportsThinking {
+		level := "high"
+		fixedLevel := normalizeReasoningLevel(modelID[strings.LastIndex(modelID, "-")+1:])
+		if fixedLevel != "" && fixedLevel != "none" {
+			level = fixedLevel
+		} else if entry.ThinkingBudget != nil {
+			switch budget := *entry.ThinkingBudget; {
+			case budget < 0:
+			case budget <= geminiThinkingBudgetLowMax:
+				level = "low"
+			case budget <= geminiThinkingBudgetMediumMax:
+				level = "medium"
+			}
+		}
+		if fixedLevel == "" || fixedLevel == "none" {
+			// Bare and tiered AGY models accept configurable budgets. The fetched
+			// thinkingBudget is their default, not the only supported budget.
+			levels = []string{"low", "medium", "high"}
+			if entry.DefaultReasoningLevel == "" {
+				entry.DefaultReasoningLevel = level
+			}
+		} else {
+			levels = []string{level}
+		}
+	}
 	if reasoning == nil && len(levels) > 0 {
 		inferred := len(levels) != 1 || levels[0] != "none"
 		reasoning = &inferred
@@ -1255,6 +1618,13 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 	if len(modalities) == 0 {
 		modalities = entry.Modalities.Input
 	}
+	if len(modalities) == 0 && (entry.SupportsImages != nil || entry.SupportsThinking != nil || entry.MaxTokens > 0) {
+		// AGY models accept text; image input requires an explicit capability.
+		modalities = []string{"text"}
+		if entry.SupportsImages != nil && *entry.SupportsImages {
+			modalities = append(modalities, "image")
+		}
+	}
 	contextWindow := entry.ContextWindow
 	if contextWindow <= 0 {
 		contextWindow = entry.MaxContextWindow
@@ -1262,15 +1632,24 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 	if contextWindow <= 0 {
 		contextWindow = entry.Limit.Context
 	}
+	if contextWindow <= 0 {
+		contextWindow = entry.MaxTokens
+	}
 	maxOutputTokens := entry.MaxOutputTokens
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = entry.Limit.Output
+	}
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = entry.MaxOutputTokensCamel
 	}
 	defaultReasoningLevel := normalizeReasoningLevel(entry.DefaultReasoningLevel)
 	if defaultReasoningLevel == "" && len(levels) > 0 {
 		defaultReasoningLevel = levels[0]
 	}
 	displayName := strings.TrimSpace(entry.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(entry.DisplayNameCamel)
+	}
 	if displayName == "" && strings.TrimSpace(entry.Name) != "" && strings.TrimSpace(entry.Name) != modelID {
 		displayName = strings.TrimSpace(entry.Name)
 	}
@@ -1283,6 +1662,7 @@ func upstreamMetadataFromCapabilityEntry(modelID string, entry upstreamModelCapa
 		SupportedReasoningLevels: levels,
 		InputModalities:          normalizeCodexInputModalities(modalities),
 		ContextWindow:            contextWindow,
+		MaxContextWindow:         entry.MaxContextWindow,
 		MaxOutputTokens:          maxOutputTokens,
 	}
 }

@@ -27,14 +27,6 @@ type mockAccountRepoForPlatform struct {
 	getByIDCalls     int
 }
 
-type mockAccountRepoForCompositeCatalog struct {
-	*mockAccountRepoForPlatform
-}
-
-func (m *mockAccountRepoForCompositeCatalog) ListSchedulableByGroupID(_ context.Context, _ int64) ([]Account, error) {
-	return append([]Account(nil), m.accounts...), nil
-}
-
 func (m *mockAccountRepoForPlatform) GetByID(ctx context.Context, id int64) (*Account, error) {
 	m.getByIDCalls++
 	if acc, ok := m.accountsByID[id]; ok {
@@ -1251,13 +1243,11 @@ func TestGatewayService_SelectAccountForModelWithPlatform_NoAccounts(t *testing.
 }
 
 func TestGatewayServiceResolveCompositeModelOwnershipUsesAntigravityCatalog(t *testing.T) {
-	account := Account{ID: 10, Platform: PlatformAntigravity, Status: StatusActive, Schedulable: true}
+	account := Account{ID: 10, Platform: PlatformAntigravity, Status: StatusActive, Schedulable: true, AccountGroups: []AccountGroup{{GroupID: 77}}}
 	account.SetUpstreamModelCatalogSnapshot(UpstreamModelCatalogSnapshot{
 		Models: []string{"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"},
 	})
-	svc := &GatewayService{accountRepo: &mockAccountRepoForCompositeCatalog{
-		mockAccountRepoForPlatform: &mockAccountRepoForPlatform{accounts: []Account{account}},
-	}}
+	svc := &GatewayService{accountRepo: &mockAccountRepoForPlatform{accounts: []Account{account}}}
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), 77, "gemini-3.8-flash")
 	require.NoError(t, err)
@@ -3460,8 +3450,8 @@ func TestGatewayService_GroupResolution_ReusesContextGroup(t *testing.T) {
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 0, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 1, groupRepo.getByIDLiteCalls) // require_privacy_set，不走账号计数聚合
 }
 
 func TestGatewayService_GroupResolution_IgnoresInvalidContextGroup(t *testing.T) {
@@ -3503,8 +3493,8 @@ func TestGatewayService_GroupResolution_IgnoresInvalidContextGroup(t *testing.T)
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 1, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 2, groupRepo.getByIDLiteCalls) // 分组解析 + require_privacy_set
 }
 
 func TestGatewayService_GroupContext_OverwritesInvalidContextGroup(t *testing.T) {
@@ -3573,8 +3563,8 @@ func TestGatewayService_GroupResolution_FallbackUsesLiteOnce(t *testing.T) {
 	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "claude-3-5-sonnet-20241022", nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	require.Equal(t, 1, groupRepo.getByIDCalls) // +1 for require_privacy_set check
-	require.Equal(t, 1, groupRepo.getByIDLiteCalls)
+	require.Equal(t, 0, groupRepo.getByIDCalls)
+	require.Equal(t, 2, groupRepo.getByIDLiteCalls) // fallback 解析 + require_privacy_set
 }
 
 func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
@@ -3613,4 +3603,75 @@ func TestGatewayService_ResolveGatewayGroup_DetectsFallbackCycle(t *testing.T) {
 	require.Nil(t, gotGroup)
 	require.Nil(t, gotID)
 	require.Contains(t, err.Error(), "fallback group cycle")
+}
+
+func TestModelRoutingAppliesToPlatform(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		targetPlatform string
+		groupPlatform  string
+		want           bool
+	}{
+		{"anthropic group", PlatformAnthropic, PlatformAnthropic, true},
+		{"openai group", PlatformOpenAI, PlatformOpenAI, true},
+		{"composite group resolved to anthropic", PlatformAnthropic, PlatformComposite, true},
+		{"composite group resolved to openai", PlatformOpenAI, PlatformComposite, true},
+		{"target platform outside the allowed set", PlatformGemini, PlatformGemini, false},
+		{"composite group resolved outside the allowed set", PlatformGemini, PlatformComposite, false},
+		{"group platform does not match target", PlatformOpenAI, PlatformAnthropic, false},
+		{"empty target platform", "", PlatformOpenAI, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, modelRoutingAppliesToPlatform(tc.targetPlatform, tc.groupPlatform))
+		})
+	}
+}
+
+// Model routing used to be read only for requests resolved to Anthropic, so an
+// OpenAI group's rules were stored and displayed but never honored. Routing an
+// OpenAI request must pick the routed account instead of the group-wide winner.
+func TestGatewayService_SelectAccountForModelWithPlatform_RoutedOpenAIGroup(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(13)
+	requestedModel := "gpt-6-astra"
+
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			// Priority 1 would win any group-wide selection, but it is not routed.
+			{ID: 1, Platform: PlatformOpenAI, Priority: 1, Status: StatusActive, Schedulable: true},
+			{ID: 2, Platform: PlatformOpenAI, Priority: 5, Status: StatusActive, Schedulable: true},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	groupRepo := &mockGroupRepoForGateway{
+		groups: map[int64]*Group{
+			groupID: {
+				ID:                  groupID,
+				Name:                "openai-route-group",
+				Platform:            PlatformOpenAI,
+				Status:              StatusActive,
+				Hydrated:            true,
+				ModelRoutingEnabled: true,
+				ModelRouting: map[string][]int64{
+					requestedModel: {2},
+				},
+			},
+		},
+	}
+
+	svc := &GatewayService{
+		accountRepo: repo,
+		cache:       &mockGatewayCacheForPlatform{},
+		cfg:         testConfig(),
+		groupRepo:   groupRepo,
+	}
+
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, PlatformOpenAI)
+	require.NoError(t, err)
+	require.NotNil(t, acc)
+	require.Equal(t, int64(2), acc.ID, "routed account must win over the higher-priority unrouted one")
 }
