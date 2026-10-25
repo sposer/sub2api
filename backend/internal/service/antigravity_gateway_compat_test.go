@@ -309,6 +309,82 @@ func TestBuildAntigravityCompatGeminiBody_ConfiguresMixedToolInvocations(t *test
 	}
 }
 
+func TestAntigravityCompatResponsesPreservesJSONSchema(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const definitions = `{
+		"OnceScheduleArgs":{
+			"type":"object",
+			"properties":{"kind":{"type":"string","const":"once"},"run_at":{"type":"string","format":"date-time"}},
+			"required":["kind","run_at"]
+		},
+		"CronScheduleArgs":{
+			"type":"object",
+			"properties":{"kind":{"type":"string","const":"cron"},"expression":{"type":"string"},"timezone":{"type":"string"}},
+			"required":["kind","expression","timezone"]
+		}
+	}`
+	const schedule = `{
+		"discriminator":{"propertyName":"kind","mapping":{"once":"#/$defs/OnceScheduleArgs","cron":"#/$defs/CronScheduleArgs"}},
+		"oneOf":[{"$ref":"#/$defs/OnceScheduleArgs"},{"$ref":"#/$defs/CronScheduleArgs"}]
+	}`
+	tests := []struct {
+		name       string
+		parameters string
+	}{
+		{
+			name: "referenced schedule variants",
+			parameters: `{
+				"type":"object","$defs":` + definitions + `,
+				"properties":{"instruction":{"type":"string"},"schedule":` + schedule + `},
+				"required":["instruction","schedule"]
+			}`,
+		},
+		{
+			name: "nullable schedule update",
+			parameters: `{
+				"type":"object","$defs":` + definitions + `,
+				"properties":{
+					"task_id":{"type":"string"},
+					"instruction":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null},
+					"schedule":{"anyOf":[` + schedule + `,{"type":"null"}],"default":null}
+				},
+				"required":["task_id"]
+			}`,
+		},
+		{
+			name: "recursive references",
+			parameters: `{
+				"type":"object",
+				"$defs":{"Node":{"type":"object","properties":{
+					"name":{"type":"string"},"children":{"type":"array","items":{"$ref":"#/$defs/Node"}}
+				}}},
+				"properties":{"root":{"$ref":"#/$defs/Node"}},
+				"required":["root"],"additionalProperties":false
+			}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+			body := []byte(`{
+				"model":"gemini-3.1-pro-high","input":"Use the provided tool",
+				"tools":[{"type":"function","name":"schema_probe","parameters":` + tt.parameters + `}]
+			}`)
+			c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/responses", body)
+
+			result, err := svc.ForwardAsResponses(context.Background(), c, newAntigravityCompatAccount(AccountTypeOAuth), body, nil)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, upstream.requestBodies, 1)
+			declaration := gjson.GetBytes(upstream.requestBodies[0], "request.tools.0.functionDeclarations.0")
+			require.False(t, declaration.Get("parameters").Exists())
+			require.JSONEq(t, tt.parameters, declaration.Get("parametersJsonSchema").Raw)
+		})
+	}
+}
+
 func TestAntigravityCompatChatMixedBuiltInToolsPreferClientFunctions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}

@@ -309,7 +309,7 @@ func TestConvertClaudeToolsToGeminiTools_CustomType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertClaudeToolsToGeminiTools(tt.tools)
+			result := convertClaudeToolsToGeminiTools(tt.tools, false)
 
 			if tt.expectedLen == 0 {
 				if result != nil {
@@ -742,7 +742,7 @@ func TestConvertClaudeToolsToGeminiTools_PreservesWebSearchAlongsideFunctions(t 
 		},
 	}
 
-	result := convertClaudeToolsToGeminiTools(tools)
+	result := convertClaudeToolsToGeminiTools(tools, false)
 	require.Len(t, result, 2)
 
 	functionDecl, ok := result[0].(map[string]any)
@@ -767,7 +767,7 @@ func TestConvertClaudeToolsToGeminiTools_TreatsNamedWebSearchWithSchemaAsFunctio
 		},
 	}
 
-	result := convertClaudeToolsToGeminiTools(tools)
+	result := convertClaudeToolsToGeminiTools(tools, false)
 	require.Len(t, result, 1)
 
 	functionDecl, ok := result[0].(map[string]any)
@@ -935,7 +935,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_AddsThoughtSignatureForToo
 	}
 	b, _ := json.Marshal(claudeReq)
 
-	out, err := convertClaudeMessagesToGeminiGenerateContent(b)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(b, false)
 	if err != nil {
 		t.Fatalf("convert failed: %v", err)
 	}
@@ -1003,7 +1003,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_ExtractsToolResultImages(t
 	body, err := json.Marshal(claudeReq)
 	require.NoError(t, err)
 
-	converted, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	converted, err := convertClaudeMessagesToGeminiGenerateContent(body, false)
 	require.NoError(t, err)
 
 	var geminiReq map[string]any

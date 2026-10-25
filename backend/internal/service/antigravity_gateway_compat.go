@@ -281,7 +281,9 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	// model; not the web-search target because capability routing must not change
 	// unrelated tool conversion semantics.
 	if useGeminiNativeTransform {
-		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
+		// decision: Use parametersJsonSchema for Antigravity Gemini; not project JSON
+		// Schema into Schema because that loses references and union constraints.
+		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody, true)
 		if err != nil {
 			return nil, err
 		}
@@ -293,9 +295,6 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 		body, err = injectIdentityPatchToGeminiRequest(body)
 		if err != nil {
 			return nil, err
-		}
-		if cleaned, cleanErr := cleanGeminiRequest(body); cleanErr == nil {
-			body = cleaned
 		}
 		return s.wrapV1InternalRequest(projectID, mappedModel, body)
 	}

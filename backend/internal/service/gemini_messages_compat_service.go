@@ -551,7 +551,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		mappedModel = account.GetMappedModel(req.Model)
 	}
 
-	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body, false)
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
@@ -793,7 +793,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					stageName = "thinking+tools"
 					signatureRetryStage = 2
 				}
-				retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(strippedClaudeBody)
+				retryGeminiReq, txErr := convertClaudeMessagesToGeminiGenerateContent(strippedClaudeBody, false)
 				if txErr == nil {
 					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: detected signature-related 400, retrying with downgraded Claude blocks (%s)", account.ID, stageName)
 					// 降级只改写历史块，思考参数沿用客户端原始请求。
@@ -3418,7 +3418,7 @@ func mapGeminiFinishReasonToClaudeStopReason(finishReason string) string {
 	}
 }
 
-func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
+func convertClaudeMessagesToGeminiGenerateContent(body []byte, useJSONSchema bool) ([]byte, error) {
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
@@ -3440,7 +3440,7 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	}
 	out["contents"] = contents
 
-	if tools := convertClaudeToolsToGeminiTools(req["tools"]); tools != nil {
+	if tools := convertClaudeToolsToGeminiTools(req["tools"], useJSONSchema); tools != nil {
 		out["tools"] = tools
 	}
 
@@ -3692,7 +3692,7 @@ func extractClaudeToolResultImageParts(v any) []any {
 	return parts
 }
 
-func convertClaudeToolsToGeminiTools(tools any) []any {
+func convertClaudeToolsToGeminiTools(tools any, useJSONSchema bool) []any {
 	arr, ok := tools.([]any)
 	if !ok || len(arr) == 0 {
 		return nil
@@ -3742,14 +3742,16 @@ func convertClaudeToolsToGeminiTools(tools any) []any {
 				"properties": map[string]any{},
 			}
 		}
-		// 清理 JSON Schema
-		cleanedParams := cleanToolSchema(params)
-
-		funcDecls = append(funcDecls, map[string]any{
+		declaration := map[string]any{
 			"name":        name,
 			"description": desc,
-			"parameters":  cleanedParams,
-		})
+		}
+		if useJSONSchema {
+			declaration["parametersJsonSchema"] = params
+		} else {
+			declaration["parameters"] = cleanToolSchema(params)
+		}
+		funcDecls = append(funcDecls, declaration)
 	}
 
 	out := make([]any, 0, 2)
