@@ -92,7 +92,16 @@ func (a *antigravityResponsesStreamAdapter) Finalize(writer *antigravityClientWr
 }
 
 func (a *antigravityResponsesStreamAdapter) WriteError(writer *antigravityClientWriter, reason string) {
-	writer.Fprintf("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"message\":%q}}\n\n", reason)
+	code := reason
+	switch reason {
+	case "empty_stream", "stream_timeout", "stream_read_error":
+		code = "server_error"
+	}
+	// decision: emit the flat Responses error contract; not client retry keyword
+	// patches because SDKs classify this event before model wrappers receive it.
+	sequenceNumber := a.anthropicState.SequenceNumber
+	a.anthropicState.SequenceNumber++
+	writer.Fprintf("event: error\ndata: {\"type\":\"error\",\"code\":%q,\"message\":%q,\"param\":null,\"sequence_number\":%d}\n\n", code, reason, sequenceNumber)
 }
 
 func (a *antigravityResponsesStreamAdapter) emitResponseEvent(event apicompat.ResponsesStreamEvent, writer *antigravityClientWriter) {
@@ -115,6 +124,7 @@ type antigravityCompatStreamSession struct {
 	firstTokenMs                *int
 	startTime                   time.Time
 	meaningfulData              bool
+	upstreamTerminal            bool
 	preContentKeepaliveSent     bool
 	preContentKeepaliveInterval time.Duration
 }
@@ -146,7 +156,13 @@ func (s *antigravityCompatStreamSession) consume(line string) {
 	if len(claudeEvents) == 0 {
 		return
 	}
-	s.consumeClaudeEvents(claudeEvents)
+	// decision: recognize ProcessLine's message_stop independently of content;
+	// not Finish's synthetic message_stop because usage-only data has no real
+	// upstream terminal. An empty terminal does not count as a first token.
+	if s.consumeClaudeEvents(claudeEvents) {
+		s.upstreamTerminal = true
+		s.flushPendingEvents()
+	}
 }
 
 func (s *antigravityCompatStreamSession) hasMeaningfulData() bool {
@@ -156,7 +172,7 @@ func (s *antigravityCompatStreamSession) hasMeaningfulData() bool {
 func (s *antigravityCompatStreamSession) writePreContentKeepalive(now time.Time) {
 	// Intentional tradeoff: this commits HTTP 200 after 15s, so later upstream
 	// failures cannot fail over; report them as SSE errors to the client instead.
-	if s.hasMeaningfulData() || s.writer.Disconnected() || now.Sub(s.startTime) < s.preContentKeepaliveInterval {
+	if s.upstreamTerminal || s.hasMeaningfulData() || s.writer.Disconnected() || now.Sub(s.startTime) < s.preContentKeepaliveInterval {
 		return
 	}
 	if s.writer.Write([]byte(": ping\n\n")) {
@@ -168,7 +184,7 @@ func (s *antigravityCompatStreamSession) finish() (*antigravityStreamResult, err
 	finalEvents, usage := s.processor.Finish()
 	mergeAntigravityCompatUsage(s.usage, usage)
 	s.consumeClaudeEvents(finalEvents)
-	if !s.hasMeaningfulData() && !s.writer.Disconnected() {
+	if !s.upstreamTerminal && !s.hasMeaningfulData() && !s.writer.Disconnected() {
 		if s.preContentKeepaliveSent {
 			s.adapter.WriteError(s.writer, "empty_stream")
 			return s.result(false), errors.New("empty Antigravity compatibility stream after keepalive")
@@ -193,23 +209,27 @@ func (s *antigravityCompatStreamSession) result(clientDisconnect bool) *antigrav
 	}
 }
 
-func (s *antigravityCompatStreamSession) consumeClaudeEvents(data []byte) {
+func (s *antigravityCompatStreamSession) consumeClaudeEvents(data []byte) bool {
 	var eventType string
+	terminal := false
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "event:"):
 			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		case strings.HasPrefix(line, "data:"):
-			s.consumeClaudeData(eventType, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			if s.consumeClaudeData(eventType, strings.TrimSpace(strings.TrimPrefix(line, "data:"))) {
+				terminal = true
+			}
 		}
 	}
+	return terminal
 }
 
-func (s *antigravityCompatStreamSession) consumeClaudeData(eventType, payload string) {
+func (s *antigravityCompatStreamSession) consumeClaudeData(eventType, payload string) bool {
 	var event apicompat.AnthropicStreamEvent
 	if json.Unmarshal([]byte(payload), &event) != nil {
-		return
+		return false
 	}
 	if event.Type == "" {
 		event.Type = eventType
@@ -221,10 +241,11 @@ func (s *antigravityCompatStreamSession) consumeClaudeData(eventType, payload st
 		mergeAnthropicUsage(s.usage, event.Message.Usage)
 	}
 	s.emitOrBuffer(event)
+	return event.Type == "message_stop"
 }
 
 func (s *antigravityCompatStreamSession) emitOrBuffer(event apicompat.AnthropicStreamEvent) {
-	if s.meaningfulData {
+	if s.meaningfulData || s.upstreamTerminal {
 		s.adapter.Emit(&event, s.writer)
 		return
 	}
@@ -237,6 +258,10 @@ func (s *antigravityCompatStreamSession) emitOrBuffer(event apicompat.AnthropicS
 	s.meaningfulData = true
 	ms := int(time.Since(s.startTime).Milliseconds())
 	s.firstTokenMs = &ms
+	s.flushPendingEvents()
+}
+
+func (s *antigravityCompatStreamSession) flushPendingEvents() {
 	for i := range s.pendingEvents {
 		s.adapter.Emit(&s.pendingEvents[i], s.writer)
 	}
@@ -355,6 +380,14 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 			resetAntigravityCompatTimer(timeoutTimer, timeout)
 			s.observeAntigravityGeminiSSELine(c, event.line)
 			session.consume(event.line)
+			if session.upstreamTerminal && !session.hasMeaningfulData() && !writer.Disconnected() {
+				// decision: finish empty terminals now; not wait for EOF because the
+				// pre-content deadline can turn completion into an error; revisit when
+				// upstream emits authoritative usage after an empty terminal.
+				// Contentful and disconnected streams still drain for final usage.
+				_ = resp.Body.Close()
+				return session.finish()
+			}
 
 		case <-timeoutCh:
 			if writer.Disconnected() {
