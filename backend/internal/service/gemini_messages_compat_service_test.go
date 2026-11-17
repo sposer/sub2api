@@ -935,7 +935,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_AddsThoughtSignatureForToo
 	}
 	b, _ := json.Marshal(claudeReq)
 
-	out, err := convertClaudeMessagesToGeminiGenerateContent(b, false)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(b, "gemini-2.5-flash", false)
 	if err != nil {
 		t.Fatalf("convert failed: %v", err)
 	}
@@ -1003,7 +1003,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_ExtractsToolResultImages(t
 	body, err := json.Marshal(claudeReq)
 	require.NoError(t, err)
 
-	converted, err := convertClaudeMessagesToGeminiGenerateContent(body, false)
+	converted, err := convertClaudeMessagesToGeminiGenerateContent(body, "gemini-2.5-flash", false)
 	require.NoError(t, err)
 
 	var geminiReq map[string]any

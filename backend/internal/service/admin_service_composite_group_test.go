@@ -210,8 +210,8 @@ func TestAdminService_CompositeModelsListCandidatesIncludeConcreteAccountMapping
 	require.Contains(t, candidates, "gemini-9.9-flash")
 	require.Contains(t, candidates, "gemini-9.9-flash-medium")
 	require.Contains(t, candidates, "gpt-5.5")
-	require.Contains(t, candidates, "gemini-2.5-flash")
-	require.NotContains(t, candidates, "gemini-3.7-flash")
+	require.Contains(t, candidates, "gemini-4-carbon")
+	require.NotContains(t, candidates, "gemini-3.1-pro-high")
 }
 
 func TestAdminService_CompositeModelsListCandidatesDoNotInventAntigravityModels(t *testing.T) {

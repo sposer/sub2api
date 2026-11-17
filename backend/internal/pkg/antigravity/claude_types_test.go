@@ -54,6 +54,7 @@ func TestIsGeminiReasoningModel(t *testing.T) {
 		"models/gemini-9.9-flash-medium",
 		"gemini-3.1-pro-high",
 		"gemini-pro-agent",
+		"gemini-4-carbon",
 		"gemini-4-argon",
 		"gemini-4-argon-high",
 		"models/gemini-9.9-argon-medium",

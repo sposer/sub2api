@@ -9,17 +9,23 @@ import (
 
 // ClaudeRequest Claude Messages API 请求
 type ClaudeRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ClaudeMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	System      json.RawMessage `json:"system,omitempty"` // string 或 []SystemBlock
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	TopK        *int            `json:"top_k,omitempty"`
-	Tools       []ClaudeTool    `json:"tools,omitempty"`
-	Thinking    *ThinkingConfig `json:"thinking,omitempty"`
-	Metadata    *ClaudeMetadata `json:"metadata,omitempty"`
+	Model        string              `json:"model"`
+	Messages     []ClaudeMessage     `json:"messages"`
+	MaxTokens    int                 `json:"max_tokens,omitempty"`
+	System       json.RawMessage     `json:"system,omitempty"` // string 或 []SystemBlock
+	Stream       bool                `json:"stream,omitempty"`
+	Temperature  *float64            `json:"temperature,omitempty"`
+	TopP         *float64            `json:"top_p,omitempty"`
+	TopK         *int                `json:"top_k,omitempty"`
+	Tools        []ClaudeTool        `json:"tools,omitempty"`
+	Thinking     *ThinkingConfig     `json:"thinking,omitempty"`
+	Metadata     *ClaudeMetadata     `json:"metadata,omitempty"`
+	OutputConfig *ClaudeOutputConfig `json:"output_config,omitempty"`
+}
+
+// ClaudeOutputConfig carries the requested reasoning effort.
+type ClaudeOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // ClaudeMessage Claude 消息
@@ -237,11 +243,11 @@ var legacyGeminiReasoningModels = []string{
 }
 
 // IsGeminiReasoningModel 判断是否为不支持采样参数的 Gemini 推理模型。
-// 这里的旧模型是协议差异，不承担模型可用性声明；Flash tier 和 Argon 按命名规则识别。
+// 这里的旧模型是协议差异，不承担模型可用性声明；Flash tier、Argon 和 Carbon 按命名规则识别。
 func IsGeminiReasoningModel(modelID string) bool {
 	lowerID := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(modelID), "models/"))
 	if strings.Contains(lowerID, "gemini-pro-agent") ||
-		(strings.HasPrefix(lowerID, "gemini-") && strings.Contains(lowerID, "-argon")) {
+		(strings.HasPrefix(lowerID, "gemini-") && (strings.Contains(lowerID, "-argon") || strings.Contains(lowerID, "-carbon"))) {
 		return true
 	}
 	if strings.Contains(lowerID, "-flash-") {

@@ -170,7 +170,7 @@ func TestDefaultModelIDsForCompositeExcludeAntigravityStaticDefaults(t *testing.
 	require.Empty(t, defaultModelIDsForPlatform(service.PlatformAntigravity))
 
 	compositeIDs := defaultModelIDsForPlatform(service.PlatformComposite)
-	require.NotContains(t, compositeIDs, "gemini-3.7-flash")
+	require.NotContains(t, compositeIDs, "gemini-3.1-pro-high")
 }
 
 // Scenario: Anthropic defaults remain provider-local while Antigravity has no static availability list.
@@ -556,7 +556,7 @@ func TestGatewayModels_GeminiGroupFallsBackToGeminiModels(t *testing.T) {
 	var got gatewayModelsResponseForTest
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Equal(t, "list", got.Object)
-	require.Contains(t, modelIDsForTest(got.Data), "gemini-2.5-flash")
+	require.Contains(t, modelIDsForTest(got.Data), "gemini-3.5-flash")
 	require.NotContains(t, modelIDsForTest(got.Data), "claude-sonnet-4-6")
 }
 
