@@ -28,18 +28,23 @@ func TestApplyCLIProxyHeadersMeetsUpstreamMinimumVersion(t *testing.T) {
 	}
 }
 
-func TestCLIUserAgentMatchesOfficialInteractiveCapture(t *testing.T) {
-	// 来源：官方 CLI 1.0.46 交互式界面在 Linux x86_64 的主 Responses 请求抓包。
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skip("该抓包样本来自 Linux x86_64")
+func TestCLIUserAgentMatchesOfficialInteractiveIdentity(t *testing.T) {
+	// Official xai-grok-http UserAgent::render uses Rust platform names.
+	platform, arch := runtime.GOOS, runtime.GOARCH
+	if platform == "darwin" {
+		platform = "macos"
 	}
-	require.Equal(t, "grok-pager/1.0.46 grok-shell/1.0.46 (linux; x86_64)", CLIUserAgent("1.0.46"))
+	if rustArch, ok := map[string]string{"amd64": "x86_64", "arm64": "aarch64", "386": "x86"}[arch]; ok {
+		arch = rustArch
+	}
+	expected := "grok-pager/1.0.88 grok-shell/1.0.88 (" + platform + "; " + arch + ")"
+	require.Equal(t, expected, CLIUserAgent("1.0.88"))
 }
 
 func TestResolveCLIVersionDefaultsToPinnedClientVersion(t *testing.T) {
 	t.Setenv(CLIVersionEnv, "")
 	// Default advertise pin is CLIClientVersion; CLIStableVersion is only the floor.
-	require.Equal(t, CLIClientVersion, ResolveCLIVersion())
+	require.Equal(t, "1.0.88", ResolveCLIVersion())
 	require.True(t, IsSupportedCLIVersion(CLIClientVersion))
 	require.True(t, IsSupportedCLIVersion(CLIStableVersion))
 }
@@ -66,20 +71,31 @@ func TestResolveCLIVersionRejectsUnsafeOrTooOld(t *testing.T) {
 }
 
 func TestApplyCLIProxyHeaders(t *testing.T) {
-	t.Setenv(CLIVersionEnv, "")
+	for _, tc := range []struct {
+		override string
+		want     string
+	}{
+		{"", "1.0.88"},
+		{"1.0.14", "1.0.14"}, // The general identity helper retains its minimum-support floor.
+		{" 1.0.89 ", "1.0.89"},
+	} {
+		t.Run("override="+tc.override, func(t *testing.T) {
+			t.Setenv(CLIVersionEnv, tc.override)
+			req, err := http.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
+			require.NoError(t, err)
+			req.Header.Set("User-Agent", "legacy-client/1.0")
+			req.Header.Set("x-grok-client-version", "0.0.1")
 
-	req, err := http.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
-	require.NoError(t, err)
-	req.Header.Set("User-Agent", "legacy-client/1.0")
+			ApplyCLIProxyHeaders(req)
 
-	ApplyCLIProxyHeaders(req)
-
-	require.Equal(t, CLIClientVersion, req.Header.Get("x-grok-client-version"))
-	require.Equal(t, CLIClientIdentifier, req.Header.Get("x-grok-client-identifier"))
-	require.Equal(t, CLITokenAuth, req.Header.Get("X-XAI-Token-Auth"))
-	require.Equal(t, "interactive", req.Header.Get("x-grok-client-mode"))
-	require.Equal(t, "authenticate-response", req.Header.Get("x-authenticateresponse"))
-	require.Equal(t, CLIUserAgent(CLIClientVersion), req.Header.Get("User-Agent"))
+			require.Equal(t, tc.want, req.Header.Get("x-grok-client-version"))
+			require.Equal(t, "grok-pager", req.Header.Get("x-grok-client-identifier"))
+			require.Equal(t, "xai-grok-cli", req.Header.Get("X-XAI-Token-Auth"))
+			require.Equal(t, "interactive", req.Header.Get("x-grok-client-mode"))
+			require.Equal(t, "authenticate-response", req.Header.Get("x-authenticateresponse"))
+			require.Equal(t, CLIUserAgent(tc.want), req.Header.Get("User-Agent"))
+		})
+	}
 }
 
 func TestApplyCLIProxyHeadersLeavesAPIHostUnchanged(t *testing.T) {

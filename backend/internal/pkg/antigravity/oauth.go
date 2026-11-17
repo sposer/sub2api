@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +34,10 @@ const (
 	// AntigravityUserAgentVersionEnv 是 Antigravity User-Agent 版本号的环境变量名。
 	AntigravityUserAgentVersionEnv = "ANTIGRAVITY_USER_AGENT_VERSION"
 
-	// DefaultUserAgentVersion 是未通过环境变量或后台设置覆盖时使用的默认版本号。
-	DefaultUserAgentVersion = "2.23.0"
+	// DefaultUserAgentVersion 对齐官方 Hub 更新清单，环境变量或后台设置可覆盖版本。
+	DefaultUserAgentVersion = "2.32.1"
+	// Hub 2.32.1 language-server 构建号，与该版本实际发送的指纹一致。
+	defaultUserAgentChangelist = "1021296516"
 
 	// 固定的 redirect_uri（用户需手动复制 code）
 	RedirectURI = "http://localhost:8085/callback"
@@ -122,10 +125,15 @@ func GetUserAgentVersionForContext(ctx context.Context) string {
 
 // BuildUserAgent 使用指定版本号构造 User-Agent；版本为空或非法时回退默认值。
 func BuildUserAgent(version string) string {
-	if normalized := NormalizeUserAgentVersion(version); normalized != "" {
-		return fmt.Sprintf("antigravity/hub/%s windows/amd64", normalized)
+	normalized := NormalizeUserAgentVersion(version)
+	if normalized == "" {
+		normalized = defaultUserAgentVersion
 	}
-	return fmt.Sprintf("antigravity/hub/%s windows/amd64", defaultUserAgentVersion)
+	// decision: use the verified Hub changelist for version-only overrides; not omit cl
+	// for unknown versions because the Hub fingerprint includes it; revisit when an
+	// authoritative version-to-changelist source is available.
+	return fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)",
+		normalized, runtime.GOOS, runtime.GOARCH, defaultUserAgentChangelist)
 }
 
 // GetUserAgentForContext 返回当前请求应使用的 User-Agent。
